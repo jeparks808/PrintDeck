@@ -1,0 +1,9 @@
+Package: local.ipadjailbreak.printdeck
+Name: PrintDeck
+Version: 0.1.0
+Architecture: iphoneos-arm
+Description: Live panel for an Elegoo Centauri Carbon: camera, progress, temperatures, controls.
+Maintainer: local
+Author: local
+Section: Utilities
+Depends: firmware (>= 5.0)
