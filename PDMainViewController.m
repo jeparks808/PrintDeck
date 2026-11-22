@@ -1,3 +1,4 @@
+#import "PDCanvasView.h"
 #import "PDMainViewController.h"
 #import "PDPrinter.h"
 #import "PDDiscovery.h"
@@ -39,6 +40,9 @@ static const int PDSpeeds[] = {50, 100, 130, 160};
 @property (nonatomic, strong) PDCard *designCard;            // beside the job card: opens the 3D design page
 @property (nonatomic, strong) UILabel *designTitle, *designInfo;
 @property (nonatomic, strong) UIImageView *designIcon;
+@property (nonatomic, strong) PDCard *canvasCard;            // right of the camera: the CANVAS filament slots
+@property (nonatomic, strong) PDCanvasView *canvasSlots;
+@property (nonatomic, strong) UILabel *canvasState;
 // right
 @property (nonatomic, strong) PDTempCard *nozzleCard, *bedCard, *chamberCard;
 @property (nonatomic, strong) PDCard *fanCard, *speedCard;
@@ -151,6 +155,16 @@ static const int PDSpeeds[] = {50, 100, 130, 160};
 	self.designInfo.numberOfLines = 2;
 	for (UIView *s in [NSArray arrayWithObjects:self.designIcon, self.designTitle, self.designInfo, nil]) { s.userInteractionEnabled = NO; [self.designCard addSubview:s]; }
 	self.remainLabel.hidden = self.doneAtLabel.hidden = YES;  // folded into the hint line
+	self.canvasCard = [[PDCard alloc] initWithFrame:CGRectZero];
+	self.canvasCard.titleLabel.text = @"CANVAS";
+	self.canvasCard.tappable = YES;
+	[self.canvasCard addTarget:self action:@selector(openCanvas) forControlEvents:UIControlEventTouchUpInside];
+	self.canvasSlots = [[PDCanvasView alloc] initWithFrame:CGRectZero];
+	self.canvasState = PDLabel([UIFont systemFontOfSize:12], PD_DIM);
+	self.canvasState.textAlignment = NSTextAlignmentRight;
+	self.canvasState.userInteractionEnabled = NO;
+	[self.canvasCard addSubview:self.canvasSlots];
+	[self.canvasCard addSubview:self.canvasState];
 	self.filesCard = [[PDFilesCard alloc] initWithFrame:CGRectZero];
 	__weak PDMainViewController *weakMain = self;
 	self.filesCard.openDetail = ^{ [weakMain openCardPageKind:@"file"]; };
@@ -215,7 +229,7 @@ static const int PDSpeeds[] = {50, 100, 130, 160};
 	for (UIView *s in [NSArray arrayWithObjects:self.offlineTitle, self.offlineDetail, search, addr, nil]) [self.offline addSubview:s];
 
 	for (UIView *s in [NSArray arrayWithObjects:self.nameLabel, self.stateLabel, self.clockLabel, self.hostLabel, self.dot, self.menuButton,
-			self.cameraOff, self.camera, self.fpsLabel, self.pauseButton, self.stopButton, self.jobCard, self.designCard, self.filesCard,
+			self.cameraOff, self.camera, self.fpsLabel, self.canvasCard, self.pauseButton, self.stopButton, self.jobCard, self.designCard, self.filesCard,
 			self.nozzleCard, self.bedCard, self.chamberCard, self.fanCard, self.speedCard, self.lightButton, self.moveButton,
 			self.offline, nil]) [v addSubview:s];
 
@@ -266,8 +280,13 @@ static const int PDSpeeds[] = {50, 100, 130, 160};
 	CGSize hs = [self.hostLabel.text sizeWithFont:self.hostLabel.font];
 	self.dot.center = CGPointMake(W - 56 - 10 - MIN(290, hs.width) - 10, 52);
 
-	// left column: camera (16:9) + job card + buttons
-	CGRect cam = CGRectMake(g, top, lw, round(lw * 9 / 16));
+	// left column: camera (16:9) with the CANVAS card beside it, then the job card, then files
+	CGFloat cw = 432, kw = lw - cw - 12;
+	CGRect cam = CGRectMake(g, top, cw, round(cw * 9 / 16));
+	self.canvasCard.frame = CGRectMake(g + cw + 12, top, kw, cam.size.height);
+	CGRect kc = [self.canvasCard contentBounds];
+	self.canvasState.frame = CGRectMake(kc.origin.x + 56, kc.origin.y - 1, kc.size.width - 56, 16);
+	self.canvasSlots.frame = CGRectMake(kc.origin.x - 2, kc.origin.y + 22, kc.size.width + 2, kc.size.height - 22);
 	self.camera.frame = cam;
 	self.cameraOff.frame = cam;
 	self.fpsLabel.frame = CGRectMake(CGRectGetMaxX(cam) - 110, CGRectGetMaxY(cam) - 22, 100, 16);
@@ -491,6 +510,7 @@ static const int PDSpeeds[] = {50, 100, 130, 160};
 
 // Detail pages for the other cards (camera / job / fans / speed / machine). A modal over whatever is there.
 - (void)openCamera { [self openCardPageKind:@"camera"]; }
+- (void)openCanvas { [self openCardPageKind:@"canvas"]; }
 - (void)openJob { [self openCardPageKind:@"job"]; }
 - (void)openFans { [self openCardPageKind:@"fans"]; }
 - (void)openSpeed { [self openCardPageKind:@"speed"]; }
@@ -664,6 +684,13 @@ static const int PDSpeeds[] = {50, 100, 130, 160};
 	self.moveButton.enabled = p.connected && !busy;
 	self.lightButton.enabled = p.connected;
 	self.nozzleCard.enabled = self.bedCard.enabled = self.chamberCard.enabled = p.connected;
+	// CANVAS: Cmd 324's slots; the printer's AmsConnectStatus says when none is plugged in
+	BOOL amsOff = PDNum(st, @"AmsConnectStatus") && [PDNum(st, @"AmsConnectStatus") intValue] == 0;
+	self.canvasSlots.info = amsOff ? nil : p.canvas;
+	self.canvasSlots.emptyText = amsOff ? @"No CANVAS plugged in" : p.connected ? @"Asking the CANVAS…" : @"Printer offline";
+	[self.canvasSlots setNeedsDisplay];
+	self.canvasState.text = amsOff ? @"" : [PDCanvasView stateTextFor:p.canvas];
+	self.canvasState.textColor = [self.canvasState.text hasPrefix:@"Slot"] ? PD_ACCENT : PD_DIM;
 	for (UIButton *b in self.fanButtons) b.enabled = p.connected;
 	for (UIButton *b in [NSArray arrayWithObjects:self.pauseButton, self.stopButton, self.moveButton, self.lightButton, nil])
 		b.alpha = b.enabled ? 1 : 0.45;

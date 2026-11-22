@@ -6,6 +6,7 @@
 #import "PDToolpath.h"
 #import "PDToolpathView.h"
 #import "PDFilesCard.h"
+#import "PDCanvasView.h"
 #import <QuartzCore/QuartzCore.h>
 
 static const int PDSpeedVals[] = {50, 100, 130, 160};
@@ -72,6 +73,10 @@ static UILabel *PDPL(UIFont *f, UIColor *c, NSTextAlignment a) {
 @property (nonatomic, strong) UILabel *machineNote;
 @property (nonatomic, strong) UITableView *filesTable;
 @property (nonatomic, strong) NSTimer *attrTimer;
+// canvas
+@property (nonatomic, strong) PDCanvasView *canvasView;
+@property (nonatomic, strong) NSArray *canvasTiles;    // status tiles: @[name, value] labels on a tile view
+@property (nonatomic, strong) UILabel *canvasNote;
 @end
 
 @implementation PDCardPage
@@ -105,6 +110,7 @@ static UILabel *PDPL(UIFont *f, UIColor *c, NSTextAlignment a) {
 		else if ([kind isEqualToString:@"fans"]) [self buildFans];
 		else if ([kind isEqualToString:@"speed"]) [self buildSpeed];
 		else if ([kind isEqualToString:@"machine"]) [self buildMachine];
+		else if ([kind isEqualToString:@"canvas"]) [self buildCanvas];
 
 		self.swipe = [[UISwipeGestureRecognizer alloc] initWithTarget:self action:@selector(back)];
 		self.swipe.direction = UISwipeGestureRecognizerDirectionRight;
@@ -153,6 +159,7 @@ static UILabel *PDPL(UIFont *f, UIColor *c, NSTextAlignment a) {
 	if ([_kind isEqualToString:@"fans"]) return @"Fans";
 	if ([_kind isEqualToString:@"speed"]) return @"Print speed";
 	if ([_kind isEqualToString:@"machine"]) return @"Move / Home";
+	if ([_kind isEqualToString:@"canvas"]) return @"CANVAS";
 	return @"";
 }
 
@@ -395,6 +402,7 @@ static UILabel *PDPL(UIFont *f, UIColor *c, NSTextAlignment a) {
 	else if ([_kind isEqualToString:@"fans"]) [self refreshFans];
 	else if ([_kind isEqualToString:@"speed"]) [self refreshSpeed];
 	else if ([_kind isEqualToString:@"machine"]) [self refreshMachine];
+	else if ([_kind isEqualToString:@"canvas"]) [self refreshCanvas];
 }
 
 - (void)refreshCamera {
@@ -938,6 +946,73 @@ static NSString *PDSlicerTime(NSString *path) {
 	else if ([_kind isEqualToString:@"fans"]) [self layoutFans:top];
 	else if ([_kind isEqualToString:@"speed"]) [self layoutSpeed:top];
 	else if ([_kind isEqualToString:@"machine"]) [self layoutMachine:top];
+	else if ([_kind isEqualToString:@"canvas"]) [self layoutCanvas:top];
+}
+
+#pragma mark CANVAS
+
+- (void)buildCanvas {
+	self.canvasView = [[PDCanvasView alloc] initWithFrame:CGRectZero];
+	self.canvasView.large = YES;
+	[self addSubview:self.canvasView];
+	NSMutableArray *tiles = [NSMutableArray array];
+	for (NSString *name in [NSArray arrayWithObjects:@"CANVAS", @"FEEDING", @"AUTO-REFILL", @"LOADED SLOTS", nil]) {
+		UIView *t = [[UIView alloc] initWithFrame:CGRectZero];
+		t.backgroundColor = PD_TILE;
+		t.layer.cornerRadius = 12;
+		UILabel *n = PDPL([UIFont boldSystemFontOfSize:12], PD_FAINT, NSTextAlignmentLeft);
+		n.text = name;
+		UILabel *v = PDPL(PDLightFont(26), [UIColor whiteColor], NSTextAlignmentLeft);
+		v.adjustsFontSizeToFitWidth = YES;
+		[t addSubview:n]; [t addSubview:v];
+		[self addSubview:t];
+		[tiles addObject:[NSArray arrayWithObjects:n, v, nil]];
+	}
+	self.canvasTiles = tiles;
+	self.canvasNote = PDPL([UIFont systemFontOfSize:14], PD_DIM, NSTextAlignmentLeft);
+	self.canvasNote.numberOfLines = 2;
+	self.canvasNote.text = @"Read from the printer every few seconds. Load, unload and set each slot's filament on the printer's screen; "
+		@"multi-colour files from ElegooSlicer map their tools to these slots.";
+	[self addSubview:self.canvasNote];
+	[[PDPrinter shared] refreshCanvas];
+}
+
+- (void)refreshCanvas {
+	PDPrinter *p = [PDPrinter shared];
+	NSDictionary *st = p.status, *info = p.canvas;
+	BOOL amsOff = PDNum(st, @"AmsConnectStatus") && [PDNum(st, @"AmsConnectStatus") intValue] == 0;
+	self.canvasView.info = amsOff ? nil : info;
+	self.canvasView.emptyText = amsOff ? @"No CANVAS plugged in" : p.connected ? @"Asking the CANVAS…" : @"Printer offline";
+	[self.canvasView setNeedsDisplay];
+	NSDictionary *u = [PDCanvasView unitIn:info];
+	int loaded = 0, total = 0;
+	for (NSDictionary *t in PDArr(u, @"tray_list")) { total++; if ([PDNum(t, @"status") intValue]) loaded++; }
+	int active = [PDNum(info, @"active_tray_id") intValue];
+	NSArray *vals = [NSArray arrayWithObjects:
+		amsOff ? @"Not plugged in" : !info ? @"—" : u ? @"Connected" : @"Not connected",
+		!u ? @"—" : active >= 0 ? [NSString stringWithFormat:@"Slot %d", active + 1] : @"Nothing",
+		!info ? @"—" : [PDNum(info, @"auto_refill") intValue] ? @"On" : @"Off",
+		!u ? @"—" : [NSString stringWithFormat:@"%d of %d", loaded, total], nil];
+	for (NSUInteger i = 0; i < [self.canvasTiles count]; i++) {
+		UILabel *v = [[self.canvasTiles objectAtIndex:i] objectAtIndex:1];
+		v.text = [vals objectAtIndex:i];
+		v.textColor = i == 1 && active >= 0 && u ? PD_ACCENT : [UIColor whiteColor];
+	}
+}
+
+- (void)layoutCanvas:(CGFloat)top {
+	CGFloat W = self.bounds.size.width, H = self.bounds.size.height, pad = 24, th = 84, gap = 16;
+	CGFloat tw = (W - 2 * pad - 3 * gap) / 4;
+	for (NSUInteger i = 0; i < [self.canvasTiles count]; i++) {
+		NSArray *t = [self.canvasTiles objectAtIndex:i];
+		UIView *tile = [[t objectAtIndex:0] superview];
+		tile.frame = CGRectMake(pad + i * (tw + gap), top, tw, th);
+		[[t objectAtIndex:0] setFrame:CGRectMake(16, 12, tw - 32, 16)];
+		[[t objectAtIndex:1] setFrame:CGRectMake(16, 34, tw - 32, 36)];
+	}
+	CGFloat y = top + th + gap;
+	self.canvasView.frame = CGRectMake(pad, y, W - 2 * pad, H - y - 90);
+	self.canvasNote.frame = CGRectMake(pad + 4, H - 80, W - 2 * pad - 8, 40);
 }
 
 - (void)layoutCamera:(CGFloat)top {

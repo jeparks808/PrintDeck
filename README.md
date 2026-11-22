@@ -6,7 +6,8 @@ the part's toolpath** with the printed layers), nozzle/bed/chamber temperatures 
 file list, set temperatures, fans, print speed and the light, and move/home axes. When a print finishes,
 fails or pauses by itself, it shows a full-screen alert and plays a sound.
 
-**Pause** and **Stop** sit in the top bar above the camera. The left column is the camera, a compact **job
+**Pause** and **Stop** sit in the top bar above the camera. The left column is the camera with the **CANVAS
+card** beside it (the four slots of Elegoo's filament changer: colour, type, brand, which slot is feeding), a compact **job
 card** (thumbnail, name, one status line with time left and finish time, progress, layer/elapsed), the
 **Design** card beside it (opens the [Design](#design) page), and a **Files card**: the printer's G-code files,
 each with its picture, beside a small **3D preview** of the one you tap (drag to rotate, pinch to zoom, double-tap to reset), with
@@ -19,6 +20,9 @@ brightened, and all are cached in `Library/Caches/PrintDeckThumbs`. See [3D tool
 - **Nozzle / bed / chamber**: a big reading, a large smooth graph with min/max/avg over the last minute, and
   quick temperature presets. The **Bed** page also has a **Bed mesh** button (see [Bed mesh](#bed-mesh)).
 - **Camera**: a large live feed, fps, pause.
+- **CANVAS** (`printdeck://page?name=canvas`): a big tile per slot (spool in its colour, type, brand, hex
+  colour, nozzle range, "FEEDING THE NOZZLE" on the active one) plus connected / feeding / auto-refill / loaded
+  tiles. Read-only: see [SDCP commands used](#sdcp-commands-used) for why slots are set on the printer's screen.
 - **Job**: a **3D toolpath view** of the part being printed (or the last one printed) with the printed layers
   coloured and the current layer highlighted, plus progress, layer, elapsed/left/finish, speed, and pause/stop
   (or the last job's outcome). See [3D toolpath viewer](#3d-toolpath-viewer).
@@ -298,6 +302,7 @@ checked against the printer (SDCP V3.0.0, firmware V1.4.49):
 | 259 | delete files | `FileList: ["/local/…gcode"]`, `FolderList: []` |
 | 260 | file details (`EstTime`, `EstWeight`, `Thumbnail`, `ColorMapping`; the reply doesn't name the file) | `Url: "/local/…gcode"` |
 | 320 / 321 | history ids / task details (thumbnail URL, outcome, `ErrorStatusReason`) | `Id: [...]` |
+| 324 | CANVAS slots: `active_canvas_id`, `active_tray_id` (−1 none), `auto_refill`, `canvas_list[].tray_list[]` (`brand`, `filament_type`, `filament_name`, `filament_color`, `min/max_nozzle_temp`, `status` 1 loaded); asked on connect, when `AmsConnectStatus` changes, and every 10 s (4 s while printing) | — |
 | 401 | jog | `Axis`, `Step` (mm, negative = minus) |
 | 402 | home | `Axis`: `X` `Y` `Z` `XYZ` |
 | 403 | set | `TempTargetNozzle`, `TempTargetHotbed`, `PrintSpeedPct`, `TargetFanSpeed{ModelFan,AuxiliaryFan,BoxFan}`, `LightStatus{SecondLight,RgbLight}` |
@@ -305,6 +310,13 @@ checked against the printer (SDCP V3.0.0, firmware V1.4.49):
 Uploading (the Slice page) is HTTP, not a command: `POST http://<printer>:3030/uploadFile/upload`, multipart
 with `Check=1`, `S-File-MD5` (of the whole file), `Uuid`, `Offset`, `TotalSize` and `File`, in chunks of at
 most 1 MiB. Each chunk answers `{"code":"000000"}`. Uploading the same name again overwrites the file.
+
+**No CANVAS slot write over the network (checked 2026-11-22).** The printer's touchscreen sets a slot's
+filament and colour inside the `app` process, but nothing exposes that: the web UI's command enum stops at
+`324 GET_MATERIAL_DATA` (plus `503 GET_FILE_COLOR_DATA`), Elegoo's own `elegoo-link` library maps only 324 for
+the CC1 (its CC2 adapter has method 2003 "write canvas filament", over MQTT, not SDCP), the OpenCentauri 0.5.0
+patches add none, and no community client (Home Assistant, TigerTag, pycentauri, filament-rfid-writer) writes
+slots. Unknown command numbers are not probed: one SDCP command is known to have crashed a CC1.
 
 `PrintInfo.Status` on this printer (from the web UI): 0 idle · 1, 15, 16 (heating), 18–21 (20 = leveling) preparing ·
 13 printing · 5 pausing · 6 paused · 7 stopping · 8/14 stopped · 9 complete · 10 file check · 12 power-loss recovery.
@@ -323,7 +335,7 @@ make package install          # needs iproxy 2222 22 running (see DEV-NOTES.md)
 URL scheme (handy over SSH: `ssh ipad "su mobile -c 'uiopen printdeck://…'"`):
 `printdeck://connect?host=IP[&port=3030&video=3031]`, `printdeck://search`, `printdeck://camera?on=0|1`,
 `printdeck://event?kind=finished|paused|failed` (preview the alert), `printdeck://card?name=nozzle|bed|chamber`
-(open a temperature detail page), `printdeck://page?name=camera|job|file|fans|speed|machine` (open a card detail
+(open a temperature detail page), `printdeck://page?name=camera|job|file|fans|speed|machine|canvas` (open a card detail
 page), `printdeck://mesh[?helper=<url-encoded JSON endpoint>]` (open the 3D bed mesh),
 `printdeck://design[?name=<design>]` (open the Design page),
 `printdeck://slice[?model=builtin:Sphere|<path>&set=key:value,…&section=<title>&go=1]` (open the Slice page:

@@ -61,6 +61,11 @@ typedef enum {
 - (void)jog:(NSString *)axis by:(double)mm; // 401
 - (void)refreshFiles;                   // 258
 - (void)refreshAttributes;              // 1 (motor/camera status, video viewers)
+// 324: the CANVAS filament changer — its slots' filament (type, colour, brand, nozzle range), which slot is
+// feeding, auto-refill. Asked on connect and every 10 s (4 s while a job runs); the reply lands in `canvas`
+// and posts PDPrinterDidUpdateNotification. Status.AmsConnectStatus says whether one is plugged in.
+- (void)refreshCanvas;
+@property (nonatomic, readonly, strong) NSDictionary *canvas;
 
 // The G-code of the running job, or of the last one if nothing is running ("/local/…gcode"), or nil.
 - (NSString *)jobFilePath;

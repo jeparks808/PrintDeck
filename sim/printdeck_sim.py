@@ -104,7 +104,7 @@ class Printer:
         machine = [1] if self.state in (13, 16, 6, 5) else [0]
         f = self.job or {"name": "", "TotalLayers": 0, "secs": 0}
         return {"Status": {
-            "CurrentStatus": machine, "TimeLapseStatus": 0, "PlatFormType": 0, "AmsConnectStatus": 0,
+            "CurrentStatus": machine, "TimeLapseStatus": 0, "PlatFormType": 0, "AmsConnectStatus": 1,
             "TempOfHotbed": self.bed, "TempOfNozzle": self.nozzle, "TempOfBox": self.box,
             "TempTargetHotbed": self.t_bed, "TempTargetNozzle": self.t_nozzle, "TempTargetBox": 0,
             "CurrenCoord": ("110.00,64.00,%.2f" % (self.layer() * 0.24)) if self.state in (13, 16, 6, 5) else "%.2f,%.2f,%.2f" % tuple(self.pos), "CurrentFanSpeed": dict(self.fans), "ZOffset": 0,
@@ -139,6 +139,14 @@ def handle(msg):
     elif cmd == 386:
         global VIDEO_ON; VIDEO_ON = bool(data.get("Enable"))
         out.append(response(386, {"Ack": 0, "VideoUrl": f"127.0.0.1:{VIDEO_PORT}/video"} if VIDEO_ON else {"Ack": 0}))
+    elif cmd == 324:   # CANVAS slots (the real printer's reply shape; slot 3 feeds while printing)
+        trays = [{"tray_id": i, "brand": "Generic", "filament_type": t, "filament_name": t, "filament_code": "0x00000",
+                  "filament_color": c, "min_nozzle_temp": lo, "max_nozzle_temp": hi, "status": 1}
+                 for i, (t, c, lo, hi) in enumerate([("PLA", "#000000", 200, 230), ("PLA", "#FFF242", 200, 230),
+                                                     ("PETG", "#F72221", 230, 260), ("PLA", "#09CC3A", 200, 230)])]
+        printing = PR.state in (13, 16, 6, 5)
+        out.append(response(324, {"Ack": 0, "active_canvas_id": 0, "active_tray_id": 2 if printing else -1, "auto_refill": 0,
+                                  "canvas_list": [{"canvas_id": 0, "connected": 1, "tray_list": trays}]}))
     elif cmd == 258:
         out.append(response(258, {"Ack": 0, "FileList": [{"name": f["name"], "type": 1, "CreateTime": int(time.time()) - 3600 * (i + 1) * 7,
                     "FileSize": f["FileSize"], "TotalLayers": f["TotalLayers"]} for i, f in enumerate(FILES)]}))

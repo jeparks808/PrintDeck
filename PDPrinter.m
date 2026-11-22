@@ -36,6 +36,8 @@ static const NSUInteger PDGraphLen = (NSUInteger)PD_GWINDOW + 4;  // samples kep
 @property (nonatomic, readwrite, copy) NSString *fileDetailPath;
 @property (nonatomic, copy) NSString *pendingDetailPath;   // the 260 reply doesn't name the file
 @property (nonatomic, assign) NSUInteger videoRequestGen;
+@property (nonatomic, readwrite, strong) NSDictionary *canvas;
+@property (nonatomic, assign) int pollCount, lastAms;
 @end
 
 @implementation PDPrinter
@@ -100,6 +102,8 @@ static const NSUInteger PDGraphLen = (NSUInteger)PD_GWINDOW + 4;  // samples kep
 	self.videoPort = videoPort > 0 ? videoPort : 3031;
 	if (!same) {
 		self.status = nil;
+		self.canvas = nil;
+		self.lastAms = 0;
 		self.attributes = nil;
 		self.files = nil;
 		self.lastTask = nil;
@@ -152,6 +156,7 @@ static const NSUInteger PDGraphLen = (NSUInteger)PD_GWINDOW + 4;  // samples kep
 	[self send:1 data:nil];
 	[self send:320 data:nil]; // history -> last job card
 	[self refreshFiles];
+	[self refreshCanvas];
 	[self.pollTimer invalidate];
 	self.pollTimer = [NSTimer scheduledTimerWithTimeInterval:2.0 target:self selector:@selector(poll) userInfo:nil repeats:YES];
 }
@@ -177,7 +182,11 @@ static const NSUInteger PDGraphLen = (NSUInteger)PD_GWINDOW + 4;  // samples kep
 		return;
 	}
 	[self send:0 data:nil];
+	self.pollCount++;
+	if (self.pollCount % (self.isBusy ? 2 : 5) == 0) [self refreshCanvas];
 }
+
+- (void)refreshCanvas { [self send:324 data:nil]; }
 
 - (void)send:(int)cmd data:(NSDictionary *)data {
 	if (!self.ws.isOpen) return;
@@ -260,6 +269,16 @@ static const NSUInteger PDGraphLen = (NSUInteger)PD_GWINDOW + 4;  // samples kep
 			}
 			break;
 		}
+		case 324: {
+			if (ack != 0 || !PDArr(d, @"canvas_list")) break;
+			NSMutableDictionary *c = [d mutableCopy];
+			[c removeObjectForKey:@"Ack"];
+			if (![c isEqualToDictionary:self.canvas]) {
+				self.canvas = c;
+				[[NSNotificationCenter defaultCenter] postNotificationName:PDPrinterDidUpdateNotification object:self];
+			}
+			break;
+		}
 		case 386:
 			if (ack != 0) NSLog(@"PrintDeck: video stream enable returned %d", ack);
 			[self flushVideoWaiters];
@@ -286,6 +305,8 @@ static const NSUInteger PDGraphLen = (NSUInteger)PD_GWINDOW + 4;  // samples kep
 
 - (void)handleStatus:(NSDictionary *)st {
 	self.status = st;
+	int ams = PDNum(st, @"AmsConnectStatus") ? [PDNum(st, @"AmsConnectStatus") intValue] : -1;
+	if (ams != self.lastAms) { self.lastAms = ams; [self refreshCanvas]; }   // plugged in or out: ask again now
 	CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
 	if (now - self.lastSample >= 4 || ![self.nozzleH count]) {
 		self.lastSample = now;
