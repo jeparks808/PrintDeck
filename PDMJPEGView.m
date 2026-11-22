@@ -12,6 +12,7 @@
 @property (nonatomic, assign) NSUInteger framesThisSecond;
 @property (nonatomic, assign) CFAbsoluteTime fpsStart, lastData;
 @property (nonatomic, strong) NSTimer *watchdog;
+@property (nonatomic, assign) NSUInteger connectGen;
 @end
 
 @implementation PDMJPEGView
@@ -50,6 +51,7 @@
 
 - (void)stop {
 	self.running = NO;
+	self.connectGen++;
 	[self.watchdog invalidate];
 	self.watchdog = nil;
 	[self.conn cancel];
@@ -59,8 +61,21 @@
 
 - (void)connect {
 	[self.conn cancel];
+	self.conn = nil;
 	self.buf = [NSMutableData data];
 	self.lastData = CFAbsoluteTimeGetCurrent();
+	NSUInteger gen = ++self.connectGen;
+	if (!self.prepare) { [self openStream]; return; }
+	__weak PDMJPEGView *weakSelf = self;
+	self.prepare(^{
+		PDMJPEGView *s = weakSelf;
+		if (!s || !s.running || s.connectGen != gen) return; // stopped or superseded meanwhile
+		s.lastData = CFAbsoluteTimeGetCurrent();
+		[s openStream];
+	});
+}
+
+- (void)openStream {
 	NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:self.url cachePolicy:NSURLRequestReloadIgnoringLocalCacheData timeoutInterval:8];
 	self.conn = [[NSURLConnection alloc] initWithRequest:req delegate:self startImmediately:NO];
 	[self.conn scheduleInRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
@@ -114,8 +129,10 @@
 		UIImage *drawn = nil;
 		if (img) {
 			// Decode now (UIImage decodes lazily on the main thread otherwise), at display size.
+			// Only shrink when the view is much smaller than the frame: a CPU resample costs more than the
+			// GPU scaling the layer (measured: the 488-pt Move / Home camera went from ~52 % to ~35 % CPU).
 			CGFloat scale = MAX(target.width / img.size.width, target.height / img.size.height);
-			if (scale > 1 || scale <= 0) scale = 1;
+			if (scale > 0.5 || scale <= 0) scale = 1;
 			CGSize sz = CGSizeMake(floor(img.size.width * scale), floor(img.size.height * scale));
 			UIGraphicsBeginImageContextWithOptions(sz, YES, 1.0);
 			[img drawInRect:CGRectMake(0, 0, sz.width, sz.height)];

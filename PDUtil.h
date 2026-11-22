@@ -3,6 +3,21 @@
 #import <UIKit/UIKit.h>
 #include <math.h>
 
+// Smooth-graph time axis (matches DeskDash): a 60 s window, four quarters holding 1/2/4/8 units of time,
+// a grid line every 2 s. Per-second samples.
+#define PD_GWINDOW 60.0
+#define PD_GGRID    2.0
+// A {window, quarters, grid, t, raw} timeline for PDSparklineView from one or more per-second lines (each an
+// NSArray of NSNumber/NSNull, newest last) taken at time t.
+static inline NSDictionary *PDMakeTimeline(NSArray *lines, double t) {
+	return [NSDictionary dictionaryWithObjectsAndKeys:
+		[NSNumber numberWithDouble:PD_GWINDOW], @"window",
+		[NSArray arrayWithObjects:[NSNumber numberWithInt:1], [NSNumber numberWithInt:2], [NSNumber numberWithInt:4], [NSNumber numberWithInt:8], nil], @"quarters",
+		[NSNumber numberWithDouble:PD_GGRID], @"grid",
+		[NSNumber numberWithDouble:t], @"t",
+		lines, @"raw", nil];
+}
+
 static inline id PDGet(id obj, NSString *key) {
 	if (![obj isKindOfClass:[NSDictionary class]]) return nil;
 	id v = [(NSDictionary *)obj objectForKey:key];

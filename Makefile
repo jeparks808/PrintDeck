@@ -9,11 +9,19 @@ INSTALL_TARGET_PROCESSES = PrintDeck
 include $(THEOS)/makefiles/common.mk
 
 APPLICATION_NAME = PrintDeck
-PrintDeck_FILES = main.m PDAppDelegate.m PDWebSocket.m PDDiscovery.m PDPrinter.m PDMJPEGView.m PDSparklineView.m PDViews.m PDPanels.m PDMainViewController.m
-PrintDeck_FRAMEWORKS = UIKit Foundation CoreGraphics QuartzCore CFNetwork AudioToolbox
+PrintDeck_FILES = main.m PDAppDelegate.m PDWebSocket.m PDDiscovery.m PDPrinter.m PDMJPEGView.m PDSparklineView.m PDViews.m PDPanels.m PDMesh.m PDMeshView.m PDDetailView.m PDCardPage.m PDToolpath.m PDToolpathView.m PDFilesCard.m PDSlicer.m PDModelView.m PDSlicePage.m PDCSG.c PDPrimitives.c PDParts.c PDDesign.m PDDesignView.m PDDesignPage.m PDMainViewController.m
+PrintDeck_FRAMEWORKS = UIKit Foundation CoreGraphics QuartzCore CFNetwork AudioToolbox GLKit OpenGLES
 PrintDeck_CFLAGS = -fobjc-arc
 
+# The slicer: CuraEngine, built as a helper executable (engine/build.sh) and shipped inside PrintDeck.app;
+# PDSlicer runs it as a child process.
+before-all::
+	@engine/build.sh
+
 include $(THEOS_MAKE_PATH)/application.mk
+
+after-stage::
+	@cp engine/build/CuraEngine $(THEOS_STAGING_DIR)/Applications/PrintDeck.app/CuraEngine
 
 after-install::
 	install.exec "su mobile -c uicache; sleep 1; su mobile -c 'uiopen printdeck://'"

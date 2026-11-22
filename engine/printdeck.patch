@@ -1,0 +1,241 @@
+diff --git a/libs/clipper/clipper.hpp b/libs/clipper/clipper.hpp
+index 8487014..9c36988 100644
+--- a/libs/clipper/clipper.hpp
++++ b/libs/clipper/clipper.hpp
+@@ -44,7 +44,7 @@
+ //#define use_xyz
+ 
+ //use_lines: Enables line clipping. Adds a very minor cost to performance.
+-//#define use_lines
++#define use_lines   // PrintDeck: open-path clipping, for gyroid infill
+   
+ //use_deprecated: Enables support for the obsolete OffsetPaths() function
+ //which has been replace with the ClipperOffset class.
+diff --git a/src/fffProcessor.h b/src/fffProcessor.h
+index 9e0e9d0..9cca74f 100644
+--- a/src/fffProcessor.h
++++ b/src/fffProcessor.h
+@@ -459,6 +459,9 @@ private:
+                 supportConfig.setData(config.printSpeed, extrusionWidth, "SUPPORT");
+             }
+ 
++            // PrintDeck: Elegoo/Orca-style layer markers, so the Centauri's layer counter and PrintDeck's viewer follow along.
++            gcode.writeComment("LAYER_CHANGE");
++            gcode.writeLine("SET_PRINT_STATS_INFO TOTAL_LAYER=%d CURRENT_LAYER=%d", int(totalLayers), int(layerNr) + 1);
+             gcode.writeComment("LAYER:%d", layerNr);
+             if (layerNr == 0)
+                 gcode.setExtrusion(config.initialLayerThickness, config.filamentDiameter, config.filamentFlow);
+@@ -478,6 +481,7 @@ private:
+                 }
+             }
+             gcode.setZ(z);
++            gcode.writeComment("Z:%.3f", z / 1000.0);   // PrintDeck
+             gcode.resetStartPosition();
+ 
+             bool printSupportFirst = (storage.support.generated && config.supportExtruder > 0 && config.supportExtruder == gcodeLayer.getExtruder());
+@@ -681,6 +685,16 @@ private:
+                         part->sparseOutline, infillPolygons,
+                         config.sparseInfillLineDistance);
+                     break;
++
++                case INFILL_GYROID:   // PrintDeck
++                {
++                    Polygons lines;
++                    int z = config.initialLayerThickness + layerNr * config.layerThickness;
++                    generateGyroidInfill(part->sparseOutline, lines, extrusionWidth,
++                                         config.sparseInfillLineDistance, config.infillOverlap, z);
++                    gcodeLayer.addPolyLinesByOptimizer(lines, &infillConfig);
++                    break;
++                }
+             }
+         }
+ 
+diff --git a/src/gcodeExport.cpp b/src/gcodeExport.cpp
+index af6dc94..12a8f9d 100644
+--- a/src/gcodeExport.cpp
++++ b/src/gcodeExport.cpp
+@@ -553,6 +553,35 @@ void GCodePlanner::addPolygonsByOptimizer(Polygons& polygons, GCodePathConfig* c
+     }
+ }
+ 
++void GCodePlanner::addPolyLinesByOptimizer(Polygons& lines, GCodePathConfig* config)
++{
++    vector<bool> done(lines.size(), false);
++    Point here = lastPosition;
++    for (unsigned int n = 0; n < lines.size(); n++)
++    {
++        int best = -1;
++        bool reversed = false;
++        int64_t bestDist = 0;
++        for (unsigned int i = 0; i < lines.size(); i++)
++        {
++            if (done[i] || lines[i].size() < 1)
++                continue;
++            int64_t d0 = vSize2(lines[i][0] - here), d1 = vSize2(lines[i][lines[i].size() - 1] - here);
++            if (best < 0 || d0 < bestDist) { best = i; bestDist = d0; reversed = false; }
++            if (d1 < bestDist) { best = i; bestDist = d1; reversed = true; }
++        }
++        if (best < 0)
++            break;
++        done[best] = true;
++        PolygonRef l = lines[best];
++        unsigned int count = l.size();
++        addTravel(l[reversed ? count - 1 : 0]);
++        for (unsigned int j = 1; j < count; j++)
++            addExtrusionMove(l[reversed ? count - 1 - j : j], config);
++        here = l[reversed ? 0 : count - 1];
++    }
++}
++
+ void GCodePlanner::forceMinimalLayerTime(double minTime, int minimalSpeed)
+ {
+     Point p0 = gcode.getPositionXY();
+diff --git a/src/gcodeExport.h b/src/gcodeExport.h
+index f9e334b..9395fd2 100644
+--- a/src/gcodeExport.h
++++ b/src/gcodeExport.h
+@@ -226,6 +226,9 @@ public:
+     void addPolygon(PolygonRef polygon, int startIdx, GCodePathConfig* config);
+ 
+     void addPolygonsByOptimizer(Polygons& polygons, GCodePathConfig* config);
++
++    // PrintDeck: open polylines (e.g. gyroid infill), greedily ordered by the nearest end, either direction.
++    void addPolyLinesByOptimizer(Polygons& lines, GCodePathConfig* config);
+     
+     void forceMinimalLayerTime(double minTime, int minimalSpeed);
+     
+diff --git a/src/infill.cpp b/src/infill.cpp
+index 7e0f6b1..33b8f22 100644
+--- a/src/infill.cpp
++++ b/src/infill.cpp
+@@ -1,5 +1,6 @@
+ /** Copyright (C) 2013 David Braam - Released under terms of the AGPLv3 License */
+ #include "infill.h"
++#include <math.h>
+ 
+ namespace cura {
+ 
+@@ -104,4 +105,75 @@ void generateLineInfill(const Polygons& in_outline, Polygons& result, int extrus
+     }
+ }
+ 
++// PrintDeck: gyroid infill. The gyroid sin x cos y + sin y cos z + sin z cos x = 0, cut at the layer height z,
++// is a set of curves we can write in closed form. With A = sin x, B = cos z, C = -sin z cos x the cut is
++// A cos y + B sin y = C, i.e. R cos(y - phi) = C with R = sqrt(A^2 + B^2), phi = atan2(B, A). When |cos z| >= |sin z|
++// then |C| <= R for every x, so the cut is two families of graphs y(x) = phi(x) +- acos(C/R) (+ 2 pi k), each
++// continuous. Otherwise the same holds with x and y swapped: x(y) = psi(y) +- acos(D/R') with D = -sin y cos z,
++// R' = sqrt(cos^2 y + sin^2 z), psi = atan(cos y / sin z) (+ pi when sin z < 0, which keeps it continuous).
++// The period is 2.41 x the line spacing: two curves per period, about 20 % longer than straight lines, so the
++// density matches the lines pattern at the same infill %. The curves are sampled, then clipped to the area.
++void generateGyroidInfill(const Polygons& in_outline, Polygons& result, int extrusionWidth, int lineSpacing, int infillOverlap, int z)
++{
++    Polygons outline = in_outline.offset(extrusionWidth * infillOverlap / 100);
++    if (outline.size() < 1 || lineSpacing <= 0)
++        return;
++    AABB box(outline);
++    const double pitch = lineSpacing * 2.41;
++    const double k = 2.0 * M_PI / pitch;          // radians per micron
++    const double zr = z * k;
++    const double sz = sin(zr), cz = cos(zr);
++    const bool graphsOfX = fabs(cz) >= fabs(sz);
++    // Sample along the curve's free axis; finer for small pitches, never finer than a line width.
++    double step = pitch / 24.0;
++    if (step < extrusionWidth) step = extrusionWidth;
++    const int64_t a0 = graphsOfX ? box.min.X : box.min.Y, a1 = graphsOfX ? box.max.X : box.max.Y;   // free axis
++    const int64_t b0 = graphsOfX ? box.min.Y : box.min.X, b1 = graphsOfX ? box.max.Y : box.max.X;   // solved axis
++    const int kMin = (int)floor(b0 * k / (2 * M_PI)) - 1, kMax = (int)ceil(b1 * k / (2 * M_PI)) + 1;
++    Polygons lines;
++    for (int branch = -1; branch <= 1; branch += 2)
++    {
++        for (int kk = kMin; kk <= kMax; kk++)
++        {
++            PolygonRef line = lines.newPoly();
++            for (double a = a0 - step; ; a += step)
++            {
++                double ar = a * k, br;
++                if (graphsOfX)
++                {
++                    double A = sin(ar), B = cz, C = -sz * cos(ar);
++                    double R = sqrt(A * A + B * B);
++                    double c = R > 1e-9 ? C / R : 0;
++                    if (c > 1) c = 1; if (c < -1) c = -1;
++                    br = atan2(B, A) + branch * acos(c) + 2 * M_PI * kk;
++                }else
++                {
++                    double D = -sin(ar) * cz, Rp = sqrt(cos(ar) * cos(ar) + sz * sz);
++                    double c = Rp > 1e-9 ? D / Rp : 0;
++                    if (c > 1) c = 1; if (c < -1) c = -1;
++                    double psi = atan(cos(ar) / sz) + (sz < 0 ? M_PI : 0);
++                    br = psi + branch * acos(c) + 2 * M_PI * kk;
++                }
++                int64_t b = (int64_t)(br / k);
++                line.add(graphsOfX ? Point((int64_t)a, b) : Point(b, (int64_t)a));
++                if (a > a1 + step)
++                    break;
++            }
++        }
++    }
++    Polygons clipped = outline.intersectionPolyLines(lines);
++    for (unsigned int i = 0; i < clipped.size(); i++)
++    {
++        PolygonRef l = clipped[i];
++        if (l.size() < 2)
++            continue;
++        int64_t len = 0;
++        for (unsigned int j = 1; j < l.size(); j++)
++            len += vSize(l[j] - l[j - 1]);
++        if (len < extrusionWidth)   // crumbs at the edge
++            continue;
++        result.add(l);
++    }
++}
++
+ }//namespace cura
+diff --git a/src/infill.h b/src/infill.h
+index 9804a4a..5c8f408 100644
+--- a/src/infill.h
++++ b/src/infill.h
+@@ -9,6 +9,8 @@ namespace cura {
+ void generateConcentricInfill(Polygons outline, Polygons& result, int inset_value);
+ void generateAutomaticInfill(const Polygons& in_outline, Polygons& result, int extrusionWidth, int lineSpacing, int infillOverlap, double rotation);
+ void generateGridInfill(const Polygons& in_outline, Polygons& result, int extrusionWidth, int lineSpacing, int infillOverlap, double rotation);
++// PrintDeck: gyroid. `result` gets open polylines (print them with GCodePlanner::addPolyLinesByOptimizer).
++void generateGyroidInfill(const Polygons& in_outline, Polygons& result, int extrusionWidth, int lineSpacing, int infillOverlap, int z);
+ void generateLineInfill(const Polygons& in_outline, Polygons& result, int extrusionWidth, int lineSpacing, int infillOverlap, double rotation);
+ 
+ }//namespace cura
+diff --git a/src/settings.h b/src/settings.h
+index 58c0cb7..f94ad57 100644
+--- a/src/settings.h
++++ b/src/settings.h
+@@ -99,6 +99,7 @@ enum Infill_Pattern
+     INFILL_GRID = 1,
+     INFILL_LINES = 2,
+     INFILL_CONCENTRIC = 3,
++    INFILL_GYROID = 4,      // PrintDeck
+ };
+ 
+ /**
+diff --git a/src/utils/polygon.h b/src/utils/polygon.h
+index 999e21d..9f18076 100644
+--- a/src/utils/polygon.h
++++ b/src/utils/polygon.h
+@@ -240,6 +240,18 @@ public:
+     Polygons() {}
+     Polygons(const Polygons& other) { polygons = other.polygons; }
+     Polygons& operator=(const Polygons& other) { polygons = other.polygons; return *this; }
++    // PrintDeck: clips open polylines (each entry of `lines` is a path, not a closed loop) to this area.
++    Polygons intersectionPolyLines(const Polygons& lines) const
++    {
++        Polygons ret;
++        ClipperLib::Clipper clipper(clipper_init);
++        clipper.AddPaths(lines.polygons, ClipperLib::ptSubject, false);
++        clipper.AddPaths(polygons, ClipperLib::ptClip, true);
++        ClipperLib::PolyTree tree;
++        clipper.Execute(ClipperLib::ctIntersection, tree);
++        ClipperLib::OpenPathsFromPolyTree(tree, ret.polygons);
++        return ret;
++    }
+     Polygons difference(const Polygons& other) const
+     {
+         Polygons ret;

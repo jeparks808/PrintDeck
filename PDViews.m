@@ -44,6 +44,8 @@
 		_targetLabel = PDLabel([UIFont systemFontOfSize:17], PD_DIM);
 		_graph = [[PDSparklineView alloc] initWithFrame:CGRectZero];
 		_graph.color = PD_HOT;
+		_graph.autoRange = YES;    // temperatures: track both ends, don't flatten a warm-but-idle reading to zero
+		_graph.minSpan = 10;       // a steady temperature stays a calm near-flat line, not magnified noise
 		for (UIView *v in [NSArray arrayWithObjects:_valueLabel, _targetLabel, _graph, nil]) [self addSubview:v];
 	}
 	return self;
@@ -58,7 +60,7 @@
 	self.graph.frame = CGRectMake(c.origin.x + left, c.origin.y + 4, c.size.width - left, c.size.height - 4);
 }
 
-- (void)setCurrent:(NSNumber *)cur target:(NSNumber *)target history:(NSArray *)hist {
+- (void)setCurrent:(NSNumber *)cur target:(NSNumber *)target {
 	self.valueLabel.text = cur ? [NSString stringWithFormat:@"%.0f°", [cur doubleValue]] : @"–";
 	double t = [target doubleValue];
 	BOOL heating = t > 0;
@@ -66,7 +68,6 @@
 	BOOL near = heating && fabs([cur doubleValue] - t) < 3;
 	self.valueLabel.textColor = !heating ? [UIColor whiteColor] : (near ? PD_GREEN : PD_HOT);
 	self.graph.color = heating ? PD_HOT : PD_ACCENT;
-	self.graph.values = hist;
 }
 
 @end

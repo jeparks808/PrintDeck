@@ -6,6 +6,9 @@
 @interface PDMJPEGView : UIView
 @property (nonatomic, copy) NSURL *url;     // set to nil to stop
 @property (nonatomic, readonly) BOOL hasFrame;
+// Called before every (re)connect; the view opens the stream when `go` runs (e.g. after the printer
+// confirms it has switched its camera stream on). Without it the view connects straight away.
+@property (nonatomic, copy) void (^prepare)(void (^go)(void));
 @property (nonatomic, readonly) double fps;
 - (void)stop;
 - (void)start;

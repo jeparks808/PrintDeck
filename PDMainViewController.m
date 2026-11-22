@@ -4,6 +4,13 @@
 #import "PDMJPEGView.h"
 #import "PDViews.h"
 #import "PDPanels.h"
+#import "PDDetailView.h"
+#import "PDMeshView.h"
+#import "PDCardPage.h"
+#import "PDFilesCard.h"
+#import "PDDesignPage.h"
+#import "PDSlicePage.h"
+#import "PDSparklineView.h"
 #import "PDUtil.h"
 #import <QuartzCore/QuartzCore.h>
 #import <AudioToolbox/AudioToolbox.h>
@@ -27,7 +34,11 @@ static const int PDSpeeds[] = {50, 100, 130, 160};
 @property (nonatomic, strong) UIImageView *thumb;
 @property (nonatomic, strong) UILabel *jobName, *percentLabel, *layerLabel, *elapsedLabel, *remainLabel, *doneAtLabel, *jobHint;
 @property (nonatomic, strong) PDProgressBar *bar;
-@property (nonatomic, strong) UIButton *pauseButton, *stopButton, *filesButton;
+@property (nonatomic, strong) UIButton *pauseButton, *stopButton;
+@property (nonatomic, strong) PDFilesCard *filesCard;
+@property (nonatomic, strong) PDCard *designCard;            // beside the job card: opens the 3D design page
+@property (nonatomic, strong) UILabel *designTitle, *designInfo;
+@property (nonatomic, strong) UIImageView *designIcon;
 // right
 @property (nonatomic, strong) PDTempCard *nozzleCard, *bedCard, *chamberCard;
 @property (nonatomic, strong) PDCard *fanCard, *speedCard;
@@ -42,6 +53,15 @@ static const int PDSpeeds[] = {50, 100, 130, 160};
 @property (nonatomic, assign) BOOL searching;
 @property (nonatomic, strong) UIPopoverController *popover;
 @property (nonatomic, strong) NSTimer *clockTimer;
+// smooth graphs
+@property (nonatomic, strong) PDGraphClock *graphClock;
+@property (nonatomic, strong) NSTimer *frameTimer;
+@property (nonatomic, strong) PDDetailView *detailView;
+@property (nonatomic, strong) PDMeshView *meshView;
+@property (nonatomic, strong) PDCardPage *cardPage;
+@property (nonatomic, strong) PDSlicePage *slicePage;
+@property (nonatomic, strong) PDDesignPage *designPage;
+@property (nonatomic, strong) NSMutableArray *hiddenUnder;
 @property (nonatomic, strong) NSMutableDictionary *thumbCache;
 @property (nonatomic, copy) NSString *thumbURL;
 @property (nonatomic, assign) int sheetFan;
@@ -80,11 +100,15 @@ static const int PDSpeeds[] = {50, 100, 130, 160};
 
 	self.camera = [[PDMJPEGView alloc] initWithFrame:CGRectMake(0, 0, 600, 338)];
 	self.camera.layer.cornerRadius = 12;
+	self.camera.prepare = ^(void (^go)(void)) { [[PDPrinter shared] enableVideoStream:go]; };
+	[self.camera addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(openCamera)]];
 	self.cameraOff = PDLabel([UIFont systemFontOfSize:16], PD_DIM);
 	self.cameraOff.textAlignment = NSTextAlignmentCenter;
 	self.cameraOff.text = @"Camera off (••• menu to turn on)";
 	self.cameraOff.backgroundColor = PD_TILE;
 	self.cameraOff.layer.cornerRadius = 12;
+	self.cameraOff.userInteractionEnabled = YES;
+	[self.cameraOff addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(openCamera)]];
 	self.fpsLabel = PDLabel([UIFont boldSystemFontOfSize:11], [UIColor colorWithWhite:1 alpha:0.7]);
 	self.fpsLabel.textAlignment = NSTextAlignmentRight;
 	self.fpsLabel.shadowColor = [UIColor blackColor];
@@ -92,16 +116,18 @@ static const int PDSpeeds[] = {50, 100, 130, 160};
 
 	self.jobCard = [[PDCard alloc] initWithFrame:CGRectZero];
 	self.jobCard.titleLabel.text = @"JOB";
+	self.jobCard.tappable = YES;
+	[self.jobCard addTarget:self action:@selector(openJob) forControlEvents:UIControlEventTouchUpInside];
 	self.thumb = [[UIImageView alloc] initWithFrame:CGRectZero];
 	self.thumb.contentMode = UIViewContentModeScaleAspectFit;
 	self.thumb.backgroundColor = [UIColor colorWithWhite:1 alpha:0.04];
 	self.thumb.layer.cornerRadius = 8;
 	self.thumb.clipsToBounds = YES;
-	self.jobName = PDLabel([UIFont boldSystemFontOfSize:22], [UIColor whiteColor]);
-	self.percentLabel = PDLabel(PDLightFont(56), [UIColor whiteColor]);
+	self.jobName = PDLabel([UIFont boldSystemFontOfSize:20], [UIColor whiteColor]);
+	self.percentLabel = PDLabel(PDLightFont(40), [UIColor whiteColor]);
 	self.percentLabel.textAlignment = NSTextAlignmentRight;
-	self.layerLabel = PDLabel([UIFont systemFontOfSize:17], PD_DIM);
-	self.elapsedLabel = PDLabel([UIFont systemFontOfSize:17], PD_DIM);
+	self.layerLabel = PDLabel([UIFont systemFontOfSize:14], PD_DIM);
+	self.elapsedLabel = PDLabel([UIFont systemFontOfSize:14], PD_DIM);
 	self.remainLabel = PDLabel(PDLightFont(34), [UIColor whiteColor]);
 	self.doneAtLabel = PDLabel([UIFont systemFontOfSize:17], PD_DIM);
 	self.jobHint = PDLabel([UIFont systemFontOfSize:14], PD_FAINT);
@@ -112,8 +138,23 @@ static const int PDSpeeds[] = {50, 100, 130, 160};
 	[self.pauseButton addTarget:self action:@selector(pauseResume) forControlEvents:UIControlEventTouchUpInside];
 	self.stopButton = PDButton(@"Stop", PD_RED);
 	[self.stopButton addTarget:self action:@selector(confirmStop) forControlEvents:UIControlEventTouchUpInside];
-	self.filesButton = PDButton(@"Files", PD_ACCENT);
-	[self.filesButton addTarget:self action:@selector(showFiles:) forControlEvents:UIControlEventTouchUpInside];
+	self.pauseButton.titleLabel.font = self.stopButton.titleLabel.font = PDBoldFont(16);
+	// Pause and Stop sit in the header, above the camera.
+	self.designCard = [[PDCard alloc] initWithFrame:CGRectZero];
+	self.designCard.titleLabel.text = @"DESIGN";
+	self.designCard.tappable = YES;
+	[self.designCard addTarget:self action:@selector(openDesignTap) forControlEvents:UIControlEventTouchUpInside];
+	self.designIcon = [[UIImageView alloc] initWithImage:[PDDesignPage iconImage]];
+	self.designTitle = PDLabel([UIFont boldSystemFontOfSize:18], [UIColor whiteColor]);
+	self.designTitle.text = @"3D design";
+	self.designInfo = PDLabel([UIFont systemFontOfSize:13], PD_DIM);
+	self.designInfo.numberOfLines = 2;
+	for (UIView *s in [NSArray arrayWithObjects:self.designIcon, self.designTitle, self.designInfo, nil]) { s.userInteractionEnabled = NO; [self.designCard addSubview:s]; }
+	self.remainLabel.hidden = self.doneAtLabel.hidden = YES;  // folded into the hint line
+	self.filesCard = [[PDFilesCard alloc] initWithFrame:CGRectZero];
+	__weak PDMainViewController *weakMain = self;
+	self.filesCard.openDetail = ^{ [weakMain openCardPageKind:@"file"]; };
+	self.filesCard.openSlice = ^{ [weakMain openSlice:nil]; };
 
 	self.nozzleCard = [[PDTempCard alloc] initWithFrame:CGRectZero];
 	self.nozzleCard.titleLabel.text = @"NOZZLE";
@@ -121,12 +162,15 @@ static const int PDSpeeds[] = {50, 100, 130, 160};
 	self.bedCard.titleLabel.text = @"BED";
 	self.chamberCard = [[PDTempCard alloc] initWithFrame:CGRectZero];
 	self.chamberCard.titleLabel.text = @"CHAMBER";
-	self.nozzleCard.tappable = self.bedCard.tappable = YES;
-	[self.nozzleCard addTarget:self action:@selector(tapNozzle:) forControlEvents:UIControlEventTouchUpInside];
-	[self.bedCard addTarget:self action:@selector(tapBed:) forControlEvents:UIControlEventTouchUpInside];
+	self.nozzleCard.tappable = self.bedCard.tappable = self.chamberCard.tappable = YES;
+	[self.nozzleCard addTarget:self action:@selector(openCard:) forControlEvents:UIControlEventTouchUpInside];
+	[self.bedCard addTarget:self action:@selector(openCard:) forControlEvents:UIControlEventTouchUpInside];
+	[self.chamberCard addTarget:self action:@selector(openCard:) forControlEvents:UIControlEventTouchUpInside];
 
 	self.fanCard = [[PDCard alloc] initWithFrame:CGRectZero];
 	self.fanCard.titleLabel.text = @"FANS";
+	self.fanCard.tappable = YES;
+	[self.fanCard addTarget:self action:@selector(openFans) forControlEvents:UIControlEventTouchUpInside];
 	NSMutableArray *fans = [NSMutableArray array];
 	for (int i = 0; i < 3; i++) {
 		UIButton *b = PDButton(@"", [UIColor whiteColor]);
@@ -134,7 +178,7 @@ static const int PDSpeeds[] = {50, 100, 130, 160};
 		b.titleLabel.textAlignment = NSTextAlignmentCenter;
 		b.titleLabel.font = [UIFont boldSystemFontOfSize:16];
 		b.tag = i;
-		[b addTarget:self action:@selector(tapFan:) forControlEvents:UIControlEventTouchUpInside];
+		b.userInteractionEnabled = NO;   // the card now opens the Fans page, where you set them
 		[self.fanCard addSubview:b];
 		[fans addObject:b];
 	}
@@ -142,6 +186,8 @@ static const int PDSpeeds[] = {50, 100, 130, 160};
 
 	self.speedCard = [[PDCard alloc] initWithFrame:CGRectZero];
 	self.speedCard.titleLabel.text = @"PRINT SPEED";
+	self.speedCard.tappable = YES;
+	[self.speedCard addTarget:self action:@selector(openSpeed) forControlEvents:UIControlEventTouchUpInside];
 	self.speedControl = [[UISegmentedControl alloc] initWithItems:[NSArray arrayWithObjects:@"Silent", @"Balanced", @"Sport", @"Ludicrous", nil]];
 	self.speedControl.segmentedControlStyle = UISegmentedControlStyleBar;
 	self.speedControl.tintColor = [UIColor colorWithWhite:0.25 alpha:1];
@@ -151,7 +197,7 @@ static const int PDSpeeds[] = {50, 100, 130, 160};
 	self.lightButton = PDButton(@"Light", PD_AMBER);
 	[self.lightButton addTarget:self action:@selector(toggleLight) forControlEvents:UIControlEventTouchUpInside];
 	self.moveButton = PDButton(@"Move / Home", PD_ACCENT);
-	[self.moveButton addTarget:self action:@selector(showMove:) forControlEvents:UIControlEventTouchUpInside];
+	[self.moveButton addTarget:self action:@selector(openMachine) forControlEvents:UIControlEventTouchUpInside];
 
 	self.offline = [[UIView alloc] initWithFrame:CGRectZero];
 	self.offline.backgroundColor = [UIColor colorWithWhite:0 alpha:0.78];
@@ -169,7 +215,7 @@ static const int PDSpeeds[] = {50, 100, 130, 160};
 	for (UIView *s in [NSArray arrayWithObjects:self.offlineTitle, self.offlineDetail, search, addr, nil]) [self.offline addSubview:s];
 
 	for (UIView *s in [NSArray arrayWithObjects:self.nameLabel, self.stateLabel, self.clockLabel, self.hostLabel, self.dot, self.menuButton,
-			self.cameraOff, self.camera, self.fpsLabel, self.jobCard, self.pauseButton, self.stopButton, self.filesButton,
+			self.cameraOff, self.camera, self.fpsLabel, self.pauseButton, self.stopButton, self.jobCard, self.designCard, self.filesCard,
 			self.nozzleCard, self.bedCard, self.chamberCard, self.fanCard, self.speedCard, self.lightButton, self.moveButton,
 			self.offline, nil]) [v addSubview:s];
 
@@ -178,8 +224,13 @@ static const int PDSpeeds[] = {50, 100, 130, 160};
 	[nc addObserver:self selector:@selector(refresh) name:PDPrinterDidUpdateNotification object:p];
 	[nc addObserver:self selector:@selector(connectionChanged) name:PDPrinterConnectionNotification object:p];
 	[nc addObserver:self selector:@selector(printerEvent:) name:PDPrinterEventNotification object:p];
+	[nc addObserver:self selector:@selector(graphSample) name:PDPrinterGraphNotification object:p];
+	self.graphClock = [[PDGraphClock alloc] init];
+	self.frameTimer = [NSTimer timerWithTimeInterval:1.0 / 20 target:self selector:@selector(frame) userInfo:nil repeats:YES];
+	[[NSRunLoop mainRunLoop] addTimer:self.frameTimer forMode:NSRunLoopCommonModes];
 	self.clockTimer = [NSTimer scheduledTimerWithTimeInterval:1 target:self selector:@selector(tick) userInfo:nil repeats:YES];
 	[self loadSounds];
+	[self refreshDesignCard];
 	self.offlineSince = CFAbsoluteTimeGetCurrent();
 	[self tick];
 	[self refresh];
@@ -199,10 +250,16 @@ static const int PDSpeeds[] = {50, 100, 130, 160};
 	CGRect b = self.view.bounds;
 	CGFloat W = b.size.width, H = b.size.height, g = 16, top = 70;
 	// header
-	self.nameLabel.frame = CGRectMake(g, 16, 300, 34);
+	// Pause and Stop: right-aligned over the camera; the name gives way to them.
+	CGFloat lw = 600, pbw = 100, pby = 17, pbh = 36;
+	self.stopButton.frame = CGRectMake(g + lw - pbw, pby, pbw, pbh);
+	self.pauseButton.frame = CGRectMake(g + lw - 2 * pbw - 10, pby, pbw, pbh);
+	CGFloat stw = MAX(110, [self.stateLabel.text sizeWithFont:self.stateLabel.font].width + 30);
+	CGFloat nmax = MAX(80, MIN(300, self.pauseButton.frame.origin.x - 16 - stw - 14 - g));
 	CGSize ns = [self.nameLabel.text sizeWithFont:self.nameLabel.font];
-	CGFloat sx = g + MIN(300, ns.width) + 14;
-	self.stateLabel.frame = CGRectMake(sx, 20, MAX(110, [self.stateLabel.text sizeWithFont:self.stateLabel.font].width + 30), 27);
+	self.nameLabel.frame = CGRectMake(g, 16, nmax, 34);
+	CGFloat sx = g + MIN(nmax, ns.width) + 14;
+	self.stateLabel.frame = CGRectMake(sx, 20, stw, 27);
 	self.menuButton.frame = CGRectMake(W - 56, 12, 48, 44);
 	self.clockLabel.frame = CGRectMake(W - 56 - 150, 10, 140, 34);
 	self.hostLabel.frame = CGRectMake(W - 56 - 300, 44, 290, 16);
@@ -210,18 +267,20 @@ static const int PDSpeeds[] = {50, 100, 130, 160};
 	self.dot.center = CGPointMake(W - 56 - 10 - MIN(290, hs.width) - 10, 52);
 
 	// left column: camera (16:9) + job card + buttons
-	CGFloat lw = 600;
 	CGRect cam = CGRectMake(g, top, lw, round(lw * 9 / 16));
 	self.camera.frame = cam;
 	self.cameraOff.frame = cam;
 	self.fpsLabel.frame = CGRectMake(CGRectGetMaxX(cam) - 110, CGRectGetMaxY(cam) - 22, 100, 16);
 	CGFloat btnH = 60, by = H - g - btnH;
-	CGFloat jy = CGRectGetMaxY(cam) + 12;
-	self.jobCard.frame = CGRectMake(g, jy, lw, by - 12 - jy);
-	CGFloat bw = (lw - 2 * 12) / 3;
-	self.pauseButton.frame = CGRectMake(g, by, bw, btnH);
-	self.stopButton.frame = CGRectMake(g + bw + 12, by, bw, btnH);
-	self.filesButton.frame = CGRectMake(g + 2 * (bw + 12), by, bw, btnH);
+	// a compact job card with the Design card beside it, then the files card (list + 3D preview) takes the rest
+	CGFloat jy = CGRectGetMaxY(cam) + 12, jh = 118, dw = 184;
+	self.jobCard.frame = CGRectMake(g, jy, lw - dw - 12, jh);
+	self.designCard.frame = CGRectMake(g + lw - dw, jy, dw, jh);
+	CGRect dc = [self.designCard contentBounds];
+	self.designIcon.frame = CGRectMake(CGRectGetMaxX(dc) - 44, dc.origin.y - 2, 44, 44);
+	self.designTitle.frame = CGRectMake(dc.origin.x, dc.origin.y + 30, dc.size.width, 24);
+	self.designInfo.frame = CGRectMake(dc.origin.x, dc.origin.y + 54, dc.size.width, 34);
+	self.filesCard.frame = CGRectMake(g, jy + jh + 12, lw, H - g - (jy + jh + 12));
 	[self layoutJobCard];
 
 	// right column
@@ -250,21 +309,20 @@ static const int PDSpeeds[] = {50, 100, 130, 160};
 	[[self.offline viewWithTag:2] setFrame:CGRectMake(W / 2 + 10, cy + 130, 200, 54)];
 }
 
+// Thumbnail | name, status line, progress bar, layer/time | percent.
 - (void)layoutJobCard {
 	CGRect c = [self.jobCard contentBounds];
-	CGFloat x = c.origin.x, y = c.origin.y + 24, ts = MIN(c.size.height - 24, 210);
-	self.thumb.frame = CGRectMake(x, y, ts, ts);
-	CGFloat tx = x + ts + 18, tw = CGRectGetMaxX(c) - tx, bottom = y + ts;
-	self.jobName.frame = CGRectMake(tx, y - 4, tw - 120, 30);
-	self.percentLabel.frame = CGRectMake(CGRectGetMaxX(c) - 120, y - 16, 120, 60);
-	self.jobHint.frame = CGRectMake(tx, y + 28, tw - 120, 20);
-	self.bar.frame = CGRectMake(tx, y + 60, tw, 16);
-	self.remainLabel.frame = CGRectMake(tx, y + 92, tw, 44);
-	self.doneAtLabel.frame = CGRectMake(tx, y + 138, tw, 22);
-	self.doneAtLabel.textAlignment = NSTextAlignmentLeft;
-	self.layerLabel.frame = CGRectMake(tx, bottom - 22, tw * 0.5, 22);
-	self.elapsedLabel.frame = CGRectMake(tx + tw * 0.5, bottom - 22, tw * 0.5, 22);
+	CGFloat x = c.origin.x, y = c.origin.y, ts = c.size.height - 20;  // the card's title sits above the thumbnail
+	self.thumb.frame = CGRectMake(x, y + 20, ts, ts);
+	CGFloat rw = 84, rx = CGRectGetMaxX(c) - rw;           // right block: percent
+	CGFloat tx = x + ts + 14, tw = rx - 14 - tx, bottom = CGRectGetMaxY(c);
+	self.jobName.frame = CGRectMake(tx, y + 14, tw, 26);
+	self.jobHint.frame = CGRectMake(tx, y + 42, tw, 18);
+	self.bar.frame = CGRectMake(tx, y + 66, tw, 10);
+	self.layerLabel.frame = CGRectMake(tx, bottom - 18, tw * 0.5, 18);
+	self.elapsedLabel.frame = CGRectMake(tx + tw * 0.5, bottom - 18, tw * 0.5, 18);
 	self.elapsedLabel.textAlignment = NSTextAlignmentRight;
+	self.percentLabel.frame = CGRectMake(rx, y + 10, rw, 46);
 }
 
 #pragma mark - Updating
@@ -323,6 +381,10 @@ static const int PDSpeeds[] = {50, 100, 130, 160};
 - (void)updateCamera {
 	PDPrinter *p = [PDPrinter shared];
 	BOOL run = self.cameraEnabled && p.connected && p.videoURL && [UIApplication sharedApplication].applicationState == UIApplicationStateActive;
+	// A full-screen page covers the dashboard: stop its camera so the A4 decodes one stream at most (the
+	// camera and machine pages run their own).
+	// The Slice page needs the CPU for slicing, so it runs no camera at all.
+	if (self.cardPage || self.meshView || self.detailView || self.slicePage || self.designPage) run = NO;
 	self.camera.hidden = !self.cameraEnabled;
 	self.cameraOff.hidden = self.cameraEnabled;
 	self.camera.url = run ? [NSURL URLWithString:p.videoURL] : nil;
@@ -330,6 +392,209 @@ static const int PDSpeeds[] = {50, 100, 130, 160};
 
 - (void)appDidResignActive { self.camera.url = nil; }
 - (void)appDidBecomeActive { [self updateCamera]; [[PDPrinter shared] reconnectNow]; }
+
+#pragma mark - Smooth graphs & detail pages
+
+- (NSArray *)ringForKind:(NSString *)k {
+	PDPrinter *p = [PDPrinter shared];
+	if ([k isEqualToString:@"nozzle"]) return p.nozzleGraph ?: [NSArray array];
+	if ([k isEqualToString:@"bed"]) return p.bedGraph ?: [NSArray array];
+	return p.chamberGraph ?: [NSArray array];
+}
+
+// A new per-second sample: rebuild the timelines and let the clock know the newest time.
+- (void)graphSample {
+	PDPrinter *p = [PDPrinter shared];
+	double t = p.graphTime;
+	[self.nozzleCard.graph setTimeline:PDMakeTimeline([NSArray arrayWithObject:(p.nozzleGraph ?: [NSArray array])], t)];
+	[self.bedCard.graph setTimeline:PDMakeTimeline([NSArray arrayWithObject:(p.bedGraph ?: [NSArray array])], t)];
+	[self.chamberCard.graph setTimeline:PDMakeTimeline([NSArray arrayWithObject:(p.chamberGraph ?: [NSArray array])], t)];
+	if (self.detailView) [self.detailView setTimeline:PDMakeTimeline([NSArray arrayWithObject:[self ringForKind:self.detailView.kind]], t)];
+	[self.graphClock noteNewest:t];
+}
+
+// ~20 fps: scroll whichever graphs are on screen to the clock's display time.
+- (void)frame {
+	if (![self.graphClock advance]) return;
+	double dt = self.graphClock.displayTime;
+	if (self.detailView) { self.detailView.displayTime = dt; return; }
+	if (self.meshView || self.cardPage || self.slicePage || self.designPage) return;  // a full-screen page covers the cards
+	self.nozzleCard.graph.displayTime = dt;
+	self.bedCard.graph.displayTime = dt;
+	self.chamberCard.graph.displayTime = dt;
+}
+
+- (void)openCard:(PDCard *)card {
+	NSString *kind = card == self.nozzleCard ? @"nozzle" : card == self.bedCard ? @"bed" : card == self.chamberCard ? @"chamber" : nil;
+	[self openDetailKind:kind];
+}
+
+- (void)openDetailKind:(NSString *)kind {
+	if (![kind isEqualToString:@"nozzle"] && ![kind isEqualToString:@"bed"] && ![kind isEqualToString:@"chamber"]) return;
+	if (self.detailView) return;
+	PDDetailView *d = [[PDDetailView alloc] initWithKind:kind];
+	d.frame = self.view.bounds;
+	d.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+	__weak PDMainViewController *weakSelf = self;
+	d.backHandler = ^{ [weakSelf closeDetail]; };
+	if ([kind isEqualToString:@"bed"]) d.openMeshHandler = ^{ [weakSelf openMesh]; };
+	self.detailView = d;
+	[self updateCamera];
+	[self.view addSubview:d];
+	[self graphSample];                               // feed it a timeline right away
+	d.displayTime = self.graphClock.displayTime;
+	if (!self.hiddenUnder) self.hiddenUnder = [NSMutableArray array];
+	for (UIView *v in self.view.subviews)
+		if (v != d && !v.hidden) { v.hidden = YES; [self.hiddenUnder addObject:v]; }
+	d.alpha = 0;
+	d.transform = CGAffineTransformMakeScale(0.97, 0.97);
+	[UIView animateWithDuration:0.22 animations:^{ d.alpha = 1; d.transform = CGAffineTransformIdentity; }];
+}
+
+- (void)closeDetail {
+	PDDetailView *d = self.detailView;
+	if (!d) return;
+	self.detailView = nil;
+	[self updateCamera];
+	for (UIView *v in self.hiddenUnder) v.hidden = NO;
+	[self.hiddenUnder removeAllObjects];
+	[UIView animateWithDuration:0.2 animations:^{ d.alpha = 0; d.transform = CGAffineTransformMakeScale(0.97, 0.97); }
+		completion:^(BOOL f) { [d removeFromSuperview]; }];
+	[self.view setNeedsLayout];
+}
+
+// The bed-mesh page, opened from the Bed detail page or printdeck://mesh. A modal over whatever is there;
+// its own ‹ back / swipe closes it, revealing what was underneath.
+- (void)openMesh {
+	if (self.meshView) return;
+	PDMeshView *mv = [[PDMeshView alloc] init];
+	mv.frame = self.view.bounds;
+	mv.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+	__weak PDMainViewController *weakSelf = self;
+	mv.backHandler = ^{ [weakSelf closeMesh]; };
+	self.meshView = mv;
+	[self updateCamera];
+	[self.view addSubview:mv];
+	mv.alpha = 0;
+	mv.transform = CGAffineTransformMakeScale(0.97, 0.97);
+	[UIView animateWithDuration:0.22 animations:^{ mv.alpha = 1; mv.transform = CGAffineTransformIdentity; }];
+}
+
+- (void)closeMesh {
+	PDMeshView *mv = self.meshView;
+	if (!mv) return;
+	self.meshView = nil;
+	[self updateCamera];
+	[UIView animateWithDuration:0.2 animations:^{ mv.alpha = 0; mv.transform = CGAffineTransformMakeScale(0.97, 0.97); }
+		completion:^(BOOL f) { [mv removeFromSuperview]; }];
+}
+
+// Detail pages for the other cards (camera / job / fans / speed / machine). A modal over whatever is there.
+- (void)openCamera { [self openCardPageKind:@"camera"]; }
+- (void)openJob { [self openCardPageKind:@"job"]; }
+- (void)openFans { [self openCardPageKind:@"fans"]; }
+- (void)openSpeed { [self openCardPageKind:@"speed"]; }
+- (void)openMachine { [self openCardPageKind:@"machine"]; }
+
+- (void)openCardPageKind:(NSString *)kind {
+	if (![kind length]) return;
+	if (self.cardPage) {                      // replace an already-open page (e.g. deep-linking)
+		[self.cardPage removeFromSuperview];
+		self.cardPage = nil;
+	}
+	PDCardPage *c = [[PDCardPage alloc] initWithKind:kind];
+	c.frame = self.view.bounds;
+	c.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+	__weak PDMainViewController *weakSelf = self;
+	c.backHandler = ^{ [weakSelf closeCardPage]; };
+	self.cardPage = c;
+	[self updateCamera];
+	[self.view addSubview:c];
+	c.alpha = 0;
+	c.transform = CGAffineTransformMakeScale(0.97, 0.97);
+	[UIView animateWithDuration:0.22 animations:^{ c.alpha = 1; c.transform = CGAffineTransformIdentity; }];
+}
+
+- (void)closeCardPage {
+	PDCardPage *c = self.cardPage;
+	if (!c) return;
+	self.cardPage = nil;
+	[self updateCamera];
+	[UIView animateWithDuration:0.2 animations:^{ c.alpha = 0; c.transform = CGAffineTransformMakeScale(0.97, 0.97); }
+		completion:^(BOOL f) { [c removeFromSuperview]; }];
+}
+
+// The Slice page (Files card → Slice…, printdeck://slice, or an STL opened in PrintDeck). A modal over the
+// dashboard like the others; `source` (a file or "builtin:<name>") opens that model in it.
+- (void)openSlice:(NSString *)source {
+	if (!self.slicePage) {
+		PDSlicePage *sp = [[PDSlicePage alloc] init];
+		sp.frame = self.view.bounds;
+		sp.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+		__weak PDMainViewController *weakSelf = self;
+		sp.backHandler = ^{ [weakSelf closeSlice]; };
+		self.slicePage = sp;
+		[self updateCamera];
+		[self.view addSubview:sp];
+		sp.alpha = 0;
+		sp.transform = CGAffineTransformMakeScale(0.97, 0.97);
+		[UIView animateWithDuration:0.22 animations:^{ sp.alpha = 1; sp.transform = CGAffineTransformIdentity; }];
+	}
+	[self.view bringSubviewToFront:self.slicePage];
+	if ([source length]) [self.slicePage openModelSource:source];
+}
+
+#pragma mark - Design
+
+- (void)openDesignTap { [self openDesign:nil]; }
+
+// The 3D design page (Design card, printdeck://design). A modal over the dashboard like the Slice page; `name`
+// opens that saved design. Send to slicer closes it and opens the exported STL on the Slice page.
+- (void)openDesign:(NSString *)name {
+	if (!self.designPage) {
+		PDDesignPage *dp = [[PDDesignPage alloc] init];
+		dp.frame = self.view.bounds;
+		dp.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+		__weak PDMainViewController *weakSelf = self;
+		dp.backHandler = ^{ [weakSelf closeDesign]; };
+		dp.sliceHandler = ^(NSString *stl) { [weakSelf closeDesign]; [weakSelf openSlice:stl]; };
+		self.designPage = dp;
+		[self updateCamera];
+		[self.view addSubview:dp];
+		dp.alpha = 0;
+		dp.transform = CGAffineTransformMakeScale(0.97, 0.97);
+		[UIView animateWithDuration:0.22 animations:^{ dp.alpha = 1; dp.transform = CGAffineTransformIdentity; }];
+	}
+	[self.view bringSubviewToFront:self.designPage];
+	if ([name length]) [self.designPage openDesignNamed:name];
+}
+
+- (void)closeDesign {
+	PDDesignPage *dp = self.designPage;
+	if (!dp) return;
+	self.designPage = nil;
+	[self updateCamera];
+	[self refreshDesignCard];
+	[UIView animateWithDuration:0.2 animations:^{ dp.alpha = 0; dp.transform = CGAffineTransformMakeScale(0.97, 0.97); }
+		completion:^(BOOL f) { [dp removeFromSuperview]; }];
+}
+
+- (void)refreshDesignCard {
+	NSArray *names = [PDDesignPage savedDesignNames];
+	self.designInfo.text = [names count] ? [NSString stringWithFormat:@"%lu saved · last: %@", (unsigned long)[names count], [names objectAtIndex:0]]
+		: @"Shapes, holes and groups. Send to slicer.";
+}
+
+- (void)scrollSliceSettingsTo:(NSString *)section { [self.slicePage scrollToSettingsSection:section]; }
+
+- (void)closeSlice {
+	PDSlicePage *sp = self.slicePage;
+	if (!sp) return;
+	self.slicePage = nil;
+	[self updateCamera];
+	[UIView animateWithDuration:0.2 animations:^{ sp.alpha = 0; sp.transform = CGAffineTransformMakeScale(0.97, 0.97); }
+		completion:^(BOOL f) { [sp removeFromSuperview]; }];
+}
 
 - (void)refresh {
 	PDPrinter *p = [PDPrinter shared];
@@ -355,9 +620,9 @@ static const int PDSpeeds[] = {50, 100, 130, 160};
 	self.hostLabel.text = p.host ? [NSString stringWithFormat:@"%@%@", p.host, p.port != 3030 ? [NSString stringWithFormat:@":%d", p.port] : @""] : @"not connected";
 
 	// temperatures
-	[self.nozzleCard setCurrent:PDNum(st, @"TempOfNozzle") target:PDNum(st, @"TempTargetNozzle") history:p.nozzleHistory];
-	[self.bedCard setCurrent:PDNum(st, @"TempOfHotbed") target:PDNum(st, @"TempTargetHotbed") history:p.bedHistory];
-	[self.chamberCard setCurrent:PDNum(st, @"TempOfBox") target:PDNum(st, @"TempTargetBox") history:p.chamberHistory];
+	[self.nozzleCard setCurrent:PDNum(st, @"TempOfNozzle") target:PDNum(st, @"TempTargetNozzle")];
+	[self.bedCard setCurrent:PDNum(st, @"TempOfHotbed") target:PDNum(st, @"TempTargetHotbed")];
+	[self.chamberCard setCurrent:PDNum(st, @"TempOfBox") target:PDNum(st, @"TempTargetBox")];
 	if ([PDNum(st, @"TempTargetBox") doubleValue] <= 0) self.chamberCard.targetLabel.text = @"no heater";
 
 	// fans
@@ -395,12 +660,12 @@ static const int PDSpeeds[] = {50, 100, 130, 160};
 	self.pauseButton.backgroundColor = [(paused ? PD_GREEN : PD_AMBER) colorWithAlphaComponent:0.14];
 	self.pauseButton.enabled = p.connected && (p.jobState == PDJobPrinting || paused);
 	self.stopButton.enabled = p.connected && busy && p.jobState != PDJobStopping;
-	self.filesButton.enabled = p.connected;
+	[self.filesCard refresh];
 	self.moveButton.enabled = p.connected && !busy;
 	self.lightButton.enabled = p.connected;
-	self.nozzleCard.enabled = self.bedCard.enabled = p.connected;
+	self.nozzleCard.enabled = self.bedCard.enabled = self.chamberCard.enabled = p.connected;
 	for (UIButton *b in self.fanButtons) b.enabled = p.connected;
-	for (UIButton *b in [NSArray arrayWithObjects:self.pauseButton, self.stopButton, self.filesButton, self.moveButton, self.lightButton, nil])
+	for (UIButton *b in [NSArray arrayWithObjects:self.pauseButton, self.stopButton, self.moveButton, self.lightButton, nil])
 		b.alpha = b.enabled ? 1 : 0.45;
 
 	// A "paused" alert is stale once the job is resumed or stopped (or this is a different printer).
@@ -439,7 +704,12 @@ static const int PDSpeeds[] = {50, 100, 130, 160};
 			[df setDateFormat:@"h:mm a"];
 			self.doneAtLabel.text = rem > 0 ? [NSString stringWithFormat:@"done ≈ %@", [df stringFromDate:[NSDate dateWithTimeIntervalSinceNow:rem]]] : @"";
 		}
-		self.jobHint.text = js == PDJobPaused ? @"Paused" : (js == PDJobPrinting ? @"" : p.jobStateText);
+		// one status line: state (unless plainly printing), time left, finish time
+		NSMutableArray *bits = [NSMutableArray array];
+		if (js != PDJobPrinting) [bits addObject:js == PDJobPaused ? @"Paused" : p.jobStateText];
+		if ([self.remainLabel.text length] && js != PDJobComplete && js != PDJobStopped) [bits addObject:self.remainLabel.text];
+		if ([self.doneAtLabel.text length]) [bits addObject:self.doneAtLabel.text];
+		self.jobHint.text = [bits componentsJoinedByString:@" · "];
 		self.bar.hidden = NO;
 	} else {
 		self.percentLabel.text = @"";
@@ -457,7 +727,7 @@ static const int PDSpeeds[] = {50, 100, 130, 160};
 			self.layerLabel.text = layers ? [NSString stringWithFormat:@"%d layers", layers] : @"";
 			self.elapsedLabel.text = (b > 0 && e > b) ? [NSString stringWithFormat:@"Took %@", PDDuration(e - b)] : @"";
 		} else {
-			self.jobHint.text = p.connected ? @"Tap Files to start a print." : @"";
+			self.jobHint.text = p.connected ? @"Pick a file below to start a print." : @"";
 			self.layerLabel.text = @"";
 			self.elapsedLabel.text = @"";
 		}
@@ -566,13 +836,6 @@ static const int PDSpeeds[] = {50, 100, 130, 160};
 
 - (void)popoverControllerDidDismissPopover:(UIPopoverController *)pc { self.popover = nil; }
 
-- (void)showFiles:(UIView *)sender {
-	PDFilesViewController *f = [[PDFilesViewController alloc] initWithStyle:UITableViewStylePlain];
-	__weak PDMainViewController *weakSelf = self;
-	f.onDone = ^{ [weakSelf.popover dismissPopoverAnimated:YES]; weakSelf.popover = nil; };
-	[self presentPopover:f from:sender];
-}
-
 - (void)showMove:(UIView *)sender {
 	PDMoveViewController *m = [[PDMoveViewController alloc] init];
 	m.title = @"Move / Home";
@@ -614,7 +877,7 @@ static const int PDSpeeds[] = {50, 100, 130, 160};
 
 - (void)showMenu {
 	UIActionSheet *s = [[UIActionSheet alloc] initWithTitle:nil delegate:self cancelButtonTitle:nil destructiveButtonTitle:nil
-		otherButtonTitles:self.cameraEnabled ? @"Turn camera off" : @"Turn camera on", @"Find printer on Wi-Fi", @"Enter printer address…", @"Reconnect", nil];
+		otherButtonTitles:@"Bed mesh", self.cameraEnabled ? @"Turn camera off" : @"Turn camera on", @"Find printer on Wi-Fi", @"Enter printer address…", @"Reconnect", nil];
 	s.tag = PDSheetMenu;
 	[s showFromRect:self.menuButton.bounds inView:self.menuButton animated:YES];
 }
@@ -639,10 +902,11 @@ static const int PDSpeeds[] = {50, 100, 130, 160};
 			break;
 		}
 		case PDSheetMenu:
-			if (i == 0) self.cameraEnabled = !self.cameraEnabled;
-			else if (i == 1) { self.offline.hidden = NO; [self startSearch]; }
-			else if (i == 2) [self promptAddress];
-			else if (i == 3) [p reconnectNow];
+			if (i == 0) [self openMesh];
+			else if (i == 1) self.cameraEnabled = !self.cameraEnabled;
+			else if (i == 2) { self.offline.hidden = NO; [self startSearch]; }
+			else if (i == 3) [self promptAddress];
+			else if (i == 4) [p reconnectNow];
 			break;
 	}
 }

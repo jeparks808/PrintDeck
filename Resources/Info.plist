@@ -69,5 +69,46 @@
 	<true/>
 	<key>UIApplicationExitsOnSuspend</key>
 	<false/>
+	<!-- The Slice page takes STL files sent with "Open in PrintDeck" (from Safari, Mail, …). -->
+	<key>CFBundleDocumentTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>STL 3D model</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>public.standard-tesselated-geometry-format</string>
+			</array>
+		</dict>
+	</array>
+	<key>UTImportedTypeDeclarations</key>
+	<array>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>public.standard-tesselated-geometry-format</string>
+			<key>UTTypeDescription</key>
+			<string>STL 3D model</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>stl</string>
+					<string>STL</string>
+				</array>
+				<key>public.mime-type</key>
+				<array>
+					<string>application/sla</string>
+					<string>model/stl</string>
+					<string>application/vnd.ms-pki.stl</string>
+				</array>
+			</dict>
+		</dict>
+	</array>
 </dict>
 </plist>

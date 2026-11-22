@@ -8,11 +8,12 @@
 - (CGRect)contentBounds;
 @end
 
-// Temperature: "NOZZLE  215° / 220°" with a heater graph.
+// Temperature: "NOZZLE  215° / 220°" with a heater graph. The graph is driven by a timeline (set graph.setTimeline
+// and graph.displayTime from the controller's PDGraphClock); setCurrent: handles the number and colours.
 @interface PDTempCard : PDCard
 @property (nonatomic, strong) UILabel *valueLabel, *targetLabel;
 @property (nonatomic, strong) PDSparklineView *graph;
-- (void)setCurrent:(NSNumber *)cur target:(NSNumber *)target history:(NSArray *)hist;
+- (void)setCurrent:(NSNumber *)cur target:(NSNumber *)target;
 @end
 
 // Thick progress bar.

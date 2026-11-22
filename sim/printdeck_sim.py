@@ -3,8 +3,10 @@
 
 Serves the same three things the real printer does, on 127.0.0.1:
   BASE      websocket  /websocket   SDCP JSON (status, attributes, files, history, print control, 403 edits)
-  BASE+1    MJPEG      /video       a drawn camera view of the part growing layer by layer
+  BASE+1    MJPEG      /video       a drawn camera view of the part growing (only after Cmd 386 Enable:1, like the real printer)
   BASE+2    HTTP       /thumb/...   job thumbnails (the real printer serves these on port 80)
+  BASE+2    HTTP       /mesh        a synthetic bed mesh in PrintDeck's JSON format (stands in for the mesh helper)
+  BASE+2    HTTP       /local/...   synthetic G-code for each file (the real printer shares /local/ on port 80)
 
 Scenarios (--scenario):
   printing   a job already 35% in (default)
@@ -20,6 +22,7 @@ P = argparse.ArgumentParser()
 P.add_argument("--base", type=int, default=13030)
 P.add_argument("--scenario", default="printing", choices=["printing", "finish", "runout", "idle"])
 P.add_argument("--speed", type=float, default=30.0)
+P.add_argument("--gcode-dir", help="serve real G-code files with the same base names from here instead of the synthetic ones")
 A = P.parse_args()
 WS_PORT, VIDEO_PORT, THUMB_PORT = A.base, A.base + 1, A.base + 2
 MAINBOARD = "5151515151515151000000000000sim0"
@@ -44,6 +47,7 @@ class Printer:
         self.task_id = ""
         self.history = []
         self.pause_at = None
+        self.pos = [0.0, 0.0, 0.0]   # toolhead position for jog/home while idle
         self.last = time.time()
         now = time.time()
         self.history.append(self.task_record(FILES[1], str(uuid.uuid4()), now - 30000, now - 16700, 1, 291, 0))
@@ -103,7 +107,7 @@ class Printer:
             "CurrentStatus": machine, "TimeLapseStatus": 0, "PlatFormType": 0, "AmsConnectStatus": 0,
             "TempOfHotbed": self.bed, "TempOfNozzle": self.nozzle, "TempOfBox": self.box,
             "TempTargetHotbed": self.t_bed, "TempTargetNozzle": self.t_nozzle, "TempTargetBox": 0,
-            "CurrenCoord": "110.00,64.00,%.2f" % (self.layer() * 0.24), "CurrentFanSpeed": dict(self.fans), "ZOffset": 0,
+            "CurrenCoord": ("110.00,64.00,%.2f" % (self.layer() * 0.24)) if self.state in (13, 16, 6, 5) else "%.2f,%.2f,%.2f" % tuple(self.pos), "CurrentFanSpeed": dict(self.fans), "ZOffset": 0,
             "LightStatus": {"SecondLight": self.light, "RgbLight": [0, 0, 0]},
             "PrintInfo": {"Status": self.state, "CurrentLayer": self.layer(), "TotalLayer": f["TotalLayers"],
                           "CurrentTicks": self.elapsed, "TotalTicks": f["secs"], "Filename": f["name"] if self.state else "",
@@ -118,7 +122,10 @@ elif A.scenario == "runout": PR.start(FILES[0]["name"], 0.38); PR.pause_at = 0.3
 
 ATTRS = {"Attributes": {"Name": "Centauri Carbon (sim)", "MachineName": "Centauri Carbon", "BrandName": "ELEGOO", "ProtocolVersion": "V3.0.0",
          "FirmwareVersion": "V1.4.49-sim", "MainboardIP": "127.0.0.1", "MainboardID": MAINBOARD, "Capabilities": ["FILE_TRANSFER", "PRINT_CONTROL", "VIDEO_STREAM"],
-         "MaximumVideoStreamAllowed": 4, "CameraStatus": 1}, "MainboardID": MAINBOARD, "Topic": f"sdcp/attributes/{MAINBOARD}"}
+         "MaximumVideoStreamAllowed": 4, "CameraStatus": 1,
+         "DevicesStatus": {"SgStatus": 1, "ZMotorStatus": 1, "XMotorStatus": 1, "YMotorStatus": 1}}, "MainboardID": MAINBOARD, "Topic": f"sdcp/attributes/{MAINBOARD}"}
+
+VIDEO_ON = False  # like the real printer: /video answers "camera not ready" until Cmd 386 {Enable: 1}
 
 def response(cmd, data):
     return {"Id": "", "Data": {"Cmd": cmd, "Data": data, "RequestID": "", "MainboardID": MAINBOARD, "TimeStamp": int(time.time())},
@@ -129,6 +136,9 @@ def handle(msg):
     out = []
     if cmd == 0: out += [response(0, {"Ack": 0}), PR.status()]
     elif cmd == 1: out += [response(1, {"Ack": 0}), ATTRS]
+    elif cmd == 386:
+        global VIDEO_ON; VIDEO_ON = bool(data.get("Enable"))
+        out.append(response(386, {"Ack": 0, "VideoUrl": f"127.0.0.1:{VIDEO_PORT}/video"} if VIDEO_ON else {"Ack": 0}))
     elif cmd == 258:
         out.append(response(258, {"Ack": 0, "FileList": [{"name": f["name"], "type": 1, "CreateTime": int(time.time()) - 3600 * (i + 1) * 7,
                     "FileSize": f["FileSize"], "TotalLayers": f["TotalLayers"]} for i, f in enumerate(FILES)]}))
@@ -153,7 +163,15 @@ def handle(msg):
         if "TargetFanSpeed" in data: PR.fans.update({k: int(v) for k, v in data["TargetFanSpeed"].items() if k in PR.fans})
         if "LightStatus" in data: PR.light = int(data["LightStatus"].get("SecondLight", PR.light))
         out.append(response(403, {"Ack": 0}))
-    elif cmd in (401, 402): out.append(response(cmd, {"Ack": 0 if PR.state in (0, 8, 9) else 1}))
+    elif cmd in (401, 402):
+        ok = PR.state in (0, 8, 9)
+        if ok and cmd == 402:   # home: the named axes go to 0
+            for i, ax in enumerate("XYZ"):
+                if ax in data.get("Axis", ""): PR.pos[i] = 0.0
+        elif ok:
+            i = "XYZ".find(data.get("Axis", "")[:1])
+            if i >= 0: PR.pos[i] = max(0.0, min(256.0, PR.pos[i] + float(data.get("Step", 0))))
+        out.append(response(cmd, {"Ack": 0 if ok else 1}))
     elif cmd is not None: out.append(response(cmd, {"Ack": 0}))
     if cmd is not None and cmd != 0: print("cmd", cmd, json.dumps(data)[:120], flush=True)
     return out
@@ -210,11 +228,64 @@ def thumb():
     d.ellipse([60, 40, 180, 100], fill=(60, 200, 90)); d.rectangle([60, 70, 180, 190], fill=(50, 180, 80)); d.ellipse([60, 160, 180, 220], fill=(60, 200, 90))
     b = io.BytesIO(); im.save(b, "PNG"); return b.getvalue()
 
+def mesh_json():
+    # A 7x7 bed with a saddle + one high corner, like a real-ish probe map (heights in mm over 20..200).
+    import json as _json
+    n, zs = 7, []
+    for gy in range(n):
+        v = gy / (n - 1) * 2 - 1
+        row = []
+        for gx in range(n):
+            u = gx / (n - 1) * 2 - 1
+            # a central dome (distinct from the app's built-in demo saddle), heights in mm
+            row.append(round(0.10 * math.exp(-(u * u + v * v) * 1.3) - 0.045, 5))
+        zs.append(row)
+    return _json.dumps({"nx": n, "ny": n, "min": [20, 20], "max": [200, 200], "z": zs, "profile": "default"}).encode()
+
+def gcode_for(name):
+    """Orca-style G-code for a file in FILES: a twisted, flared rounded-square vase with one layer per TotalLayers,
+    outer + inner walls and sparse infill, ;LAYER_CHANGE/;Z:/;TYPE: comments, relative E (M83). About 1-2 MB."""
+    from urllib.parse import unquote
+    name = unquote(name)
+    if A.gcode_dir:
+        import os
+        real = os.path.join(A.gcode_dir, os.path.basename(name))
+        if os.path.isfile(real):
+            with open(real, "rb") as fh: return fh.read()
+    f = next((x for x in FILES if x["name"] == name), None)
+    if not f: return None
+    n, lh, out = f["TotalLayers"], 0.24, []
+    w = out.append
+    w("; generated by printdeck_sim\n; total layer number: %d\nG90\nM83\nG28\n;TYPE:Custom\nG1 X10 Y-1 Z0.3 F6000\nG1 X120 E12 F1500\n" % n)
+    for i in range(n):
+        z = 0.3 + i * lh
+        w(";LAYER_CHANGE\n;Z:%.2f\n;HEIGHT:%.2f\n" % (z, lh))
+        h = i / max(1, n - 1)
+        rot = h * 1.2
+        for kind, inset in (("Outer wall", 0.0), ("Inner wall", 0.45)):
+            w(";TYPE:%s\n" % kind)
+            pts = []
+            for k in range(73):
+                a = k / 72 * 2 * math.pi
+                r = 30 + 10 * math.sin(h * math.pi) - inset            # flares in the middle
+                sq = 1 / max(abs(math.cos(a)), abs(math.sin(a))) ** 0.35  # rounded square
+                pts.append((128 + r * sq * math.cos(a + rot), 128 + r * sq * math.sin(a + rot)))
+            w("G1 X%.3f Y%.3f F12000\nG1 Z%.2f\n" % (pts[0][0], pts[0][1], z))
+            for x, y in pts[1:]: w("G1 X%.3f Y%.3f E0.06\n" % (x, y))
+        if i < 3 or i % 6 == 0:
+            w(";TYPE:Sparse infill\n")
+            for k in range(-20, 21, 5):
+                w("G1 X%.3f Y%.3f F12000\nG1 X%.3f Y%.3f E1.2\n" % (108 + k, 108, 148 + k, 148))
+    w(";TYPE:Custom\nG1 Z%.2f F600\nM104 S0\nM140 S0\n" % (0.3 + n * lh + 10))
+    return "".join(out).encode()
+
 async def http_client(reader, writer):
     try:
         head = await reader.readuntil(b"\r\n\r\n")
         path = head.split(b" ")[1].decode()
-        if path.startswith("/video"):
+        if path.startswith("/video") and not VIDEO_ON:
+            writer.write(b"camera not ready")
+        elif path.startswith("/video"):
             writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: multipart/x-mixed-replace; boundary=--foo\r\n\r\n")
             while True:
                 j = frame()
@@ -223,6 +294,17 @@ async def http_client(reader, writer):
         elif path.startswith("/thumb/"):
             body = thumb()
             writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: %d\r\n\r\n" % len(body) + body)
+        elif path.startswith("/local/"):
+            body = gcode_for(path)
+            if body is None:
+                writer.write(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")
+            else:
+                writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: %d\r\n\r\n" % len(body))
+                for i in range(0, len(body), 65536):
+                    writer.write(body[i:i + 65536]); await writer.drain()
+        elif path.startswith("/mesh"):
+            body = mesh_json()
+            writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n" % len(body) + body)
         else:
             writer.write(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")
         await writer.drain()

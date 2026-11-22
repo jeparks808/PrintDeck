@@ -1,13 +1,16 @@
 #import "PDPrinter.h"
 #import "PDWebSocket.h"
 #import "PDUtil.h"
+#import <QuartzCore/QuartzCore.h>
 
 NSString *const PDPrinterDidUpdateNotification = @"PDPrinterDidUpdateNotification";
 NSString *const PDPrinterConnectionNotification = @"PDPrinterConnectionNotification";
 NSString *const PDPrinterFilesNotification = @"PDPrinterFilesNotification";
 NSString *const PDPrinterEventNotification = @"PDPrinterEventNotification";
+NSString *const PDPrinterGraphNotification = @"PDPrinterGraphNotification";
 
 static const NSUInteger PDHistoryLen = 300;
+static const NSUInteger PDGraphLen = (NSUInteger)PD_GWINDOW + 4;  // samples kept for the smooth graphs
 
 @interface PDPrinter () <PDWebSocketDelegate>
 @property (nonatomic, readwrite, copy) NSString *host, *lastError, *videoURL;
@@ -16,6 +19,9 @@ static const NSUInteger PDHistoryLen = 300;
 @property (nonatomic, readwrite, strong) NSDictionary *status, *attributes, *lastTask;
 @property (nonatomic, readwrite, strong) NSArray *files;
 @property (nonatomic, strong) NSMutableArray *nozzleH, *bedH, *chamberH;
+@property (nonatomic, strong) NSMutableArray *nozzleG, *bedG, *chamberG;  // per-second, for the smooth graphs
+@property (nonatomic, readwrite) double graphTime;
+@property (nonatomic, strong) NSTimer *graphTimer;
 @property (nonatomic, strong) PDWebSocket *ws;
 @property (nonatomic, copy) NSString *mainboardID;
 @property (nonatomic, strong) NSTimer *pollTimer, *retryTimer;
@@ -25,6 +31,11 @@ static const NSUInteger PDHistoryLen = 300;
 @property (nonatomic, assign) PDJobState awaitingOutcome; // PDJobComplete/PDJobStopped while waiting for the history entry
 @property (nonatomic, assign) int outcomeTries;
 @property (nonatomic, copy) NSString *taskBeforeOutcome, *requestedTask;
+@property (nonatomic, strong) NSMutableArray *videoWaiters;
+@property (nonatomic, readwrite, strong) NSDictionary *fileDetail;
+@property (nonatomic, readwrite, copy) NSString *fileDetailPath;
+@property (nonatomic, copy) NSString *pendingDetailPath;   // the 260 reply doesn't name the file
+@property (nonatomic, assign) NSUInteger videoRequestGen;
 @end
 
 @implementation PDPrinter
@@ -41,8 +52,14 @@ static const NSUInteger PDHistoryLen = 300;
 		_nozzleH = [NSMutableArray array];
 		_bedH = [NSMutableArray array];
 		_chamberH = [NSMutableArray array];
+		_nozzleG = [NSMutableArray array];
+		_bedG = [NSMutableArray array];
+		_chamberG = [NSMutableArray array];
 		_prevPrintStatus = -1;
 		_awaitingOutcome = PDJobUnknown;
+		_videoWaiters = [NSMutableArray array];
+		_graphTimer = [NSTimer timerWithTimeInterval:1.0 target:self selector:@selector(sampleGraph) userInfo:nil repeats:YES];
+		[[NSRunLoop mainRunLoop] addTimer:_graphTimer forMode:NSRunLoopCommonModes];
 	}
 	return self;
 }
@@ -50,6 +67,29 @@ static const NSUInteger PDHistoryLen = 300;
 - (NSArray *)nozzleHistory { return [self.nozzleH copy]; }
 - (NSArray *)bedHistory { return [self.bedH copy]; }
 - (NSArray *)chamberHistory { return [self.chamberH copy]; }
+- (NSArray *)nozzleGraph { return [self.nozzleG copy]; }
+- (NSArray *)bedGraph { return [self.bedG copy]; }
+- (NSArray *)chamberGraph { return [self.chamberG copy]; }
+
+// One per-second sample of the three temperatures for the smooth graphs. A gap (NSNull) while disconnected or
+// before the first status, so the graph shows the break instead of a flat line.
+- (void)sampleGraph {
+	NSDictionary *st = self.status;
+	BOOL live = self.connected && st != nil;
+	id n = live && PDNum(st, @"TempOfNozzle") ? PDNum(st, @"TempOfNozzle") : [NSNull null];
+	id b = live && PDNum(st, @"TempOfHotbed") ? PDNum(st, @"TempOfHotbed") : [NSNull null];
+	id c = live && PDNum(st, @"TempOfBox") ? PDNum(st, @"TempOfBox") : [NSNull null];
+	[self push:n onto:self.nozzleG cap:PDGraphLen];
+	[self push:b onto:self.bedG cap:PDGraphLen];
+	[self push:c onto:self.chamberG cap:PDGraphLen];
+	self.graphTime = CACurrentMediaTime();
+	[[NSNotificationCenter defaultCenter] postNotificationName:PDPrinterGraphNotification object:self];
+}
+
+- (void)push:(id)v onto:(NSMutableArray *)arr cap:(NSUInteger)cap {
+	[arr addObject:v ?: [NSNull null]];
+	while ([arr count] > cap) [arr removeObjectAtIndex:0];
+}
 
 #pragma mark - Connection
 
@@ -69,6 +109,9 @@ static const NSUInteger PDHistoryLen = 300;
 		[self.nozzleH removeAllObjects];
 		[self.bedH removeAllObjects];
 		[self.chamberH removeAllObjects];
+		[self.nozzleG removeAllObjects];
+		[self.bedG removeAllObjects];
+		[self.chamberG removeAllObjects];
 	}
 	self.videoURL = [NSString stringWithFormat:@"http://%@:%d/video", self.host, self.videoPort];
 	[self reconnectNow];
@@ -208,6 +251,19 @@ static const NSUInteger PDHistoryLen = 300;
 			}
 			break;
 		}
+		case 260: {
+			NSDictionary *info = PDDict(d, @"FileInfo");
+			if (info && self.pendingDetailPath) {
+				self.fileDetail = info;
+				self.fileDetailPath = self.pendingDetailPath;
+				[[NSNotificationCenter defaultCenter] postNotificationName:PDPrinterDidUpdateNotification object:self];
+			}
+			break;
+		}
+		case 386:
+			if (ack != 0) NSLog(@"PrintDeck: video stream enable returned %d", ack);
+			[self flushVideoWaiters];
+			break;
 		case 128: case 129: case 130: case 131: case 401: case 402: case 403:
 			if (ack != 0) [self postEvent:@"error" title:@"Printer refused the command" detail:[self ackText:cmd ack:ack]];
 			break;
@@ -447,6 +503,67 @@ static const NSUInteger PDHistoryLen = 300;
 
 - (void)jog:(NSString *)axis by:(double)mm {
 	[self send:401 data:[NSDictionary dictionaryWithObjectsAndKeys:axis, @"Axis", [NSNumber numberWithDouble:mm], @"Step", nil]];
+}
+
+- (void)enableVideoStream:(void (^)(void))then {
+	if (then) [self.videoWaiters addObject:[then copy]];
+	if (!self.ws.isOpen) { [self flushVideoWaiters]; return; } // try the camera anyway
+	[self send:386 data:[NSDictionary dictionaryWithObject:[NSNumber numberWithInt:1] forKey:@"Enable"]];
+	NSUInteger gen = ++self.videoRequestGen;
+	__weak PDPrinter *weakSelf = self;
+	dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+		if (weakSelf.videoRequestGen == gen) [weakSelf flushVideoWaiters];
+	});
+}
+
+- (void)flushVideoWaiters {
+	self.videoRequestGen++;
+	NSArray *w = [self.videoWaiters copy];
+	[self.videoWaiters removeAllObjects];
+	for (void (^b)(void) in w) b();
+}
+
+- (void)refreshAttributes { [self send:1 data:nil]; }
+
+- (void)requestFileDetail:(NSString *)path {
+	if (![path length] || [path isEqualToString:self.fileDetailPath]) return;
+	self.pendingDetailPath = path;
+	[self send:260 data:[NSDictionary dictionaryWithObject:path forKey:@"Url"]];
+}
+
+- (NSString *)jobFilePath {
+	NSString *f = PDStr([self printInfo], @"Filename");
+	if (![f length]) f = PDStr(self.lastTask, @"TaskName");
+	if (![f length]) return nil;
+	return [f hasPrefix:@"/"] ? f : [@"/local/" stringByAppendingString:f];
+}
+
+- (NSURL *)urlForFile:(NSString *)path {
+	if (![path length] || !self.host) return nil;
+	NSString *origin = [NSString stringWithFormat:@"http://%@", self.host];
+	NSURL *thumb = [NSURL URLWithString:PDStr(self.lastTask, @"Thumbnail") ?: @""];
+	if ([thumb host]) origin = [thumb port] ? [NSString stringWithFormat:@"%@://%@:%@", [thumb scheme], [thumb host], [thumb port]]
+		: [NSString stringWithFormat:@"%@://%@", [thumb scheme], [thumb host]];
+	NSString *enc = (__bridge_transfer NSString *)CFURLCreateStringByAddingPercentEscapes(NULL, (__bridge CFStringRef)path, NULL,
+		CFSTR("?#[]@!$&'()*+,;=% "), kCFStringEncodingUTF8);
+	return [NSURL URLWithString:[origin stringByAppendingString:enc]];
+}
+
+- (long long)sizeOfFile:(NSString *)path {
+	for (NSDictionary *f in self.files) if ([PDStr(f, @"name") isEqualToString:path]) return [PDNum(f, @"FileSize") longLongValue];
+	return 0;
+}
+
+- (BOOL)getPosition:(double *)xyz {
+	NSString *c = PDStr(self.status, @"CurrenCoord");
+	if (![c length]) return NO;
+	NSScanner *sc = [NSScanner scannerWithString:c];
+	NSCharacterSet *skip = [[NSCharacterSet characterSetWithCharactersInString:@"-.0123456789"] invertedSet];
+	for (int i = 0; i < 3; i++) {
+		[sc scanCharactersFromSet:skip intoString:NULL];
+		if (![sc scanDouble:&xyz[i]]) return NO;
+	}
+	return YES;
 }
 
 - (void)refreshFiles { [self send:258 data:[NSDictionary dictionaryWithObject:@"/local" forKey:@"Url"]]; }
