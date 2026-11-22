@@ -24,8 +24,10 @@ static UILabel *PDPL(UIFont *f, UIColor *c, NSTextAlignment a) {
 	UILabel *l = PDLabel(f, c); l.textAlignment = a; return l;
 }
 
-@interface PDCardPage () <UIGestureRecognizerDelegate, UIAlertViewDelegate, UITableViewDataSource, UITableViewDelegate> {
+@interface PDCardPage () <UIGestureRecognizerDelegate, UIAlertViewDelegate, UIActionSheetDelegate, UITableViewDataSource, UITableViewDelegate> {
 	NSString *_kind;
+	int _laneSlot;           // CANVAS slot being edited (COSMOS)
+	NSString *_laneMaterial;
 	int _alertKind;          // 1 = stop, 2 = print file
 	NSString *_pendingFile;
 	BOOL _following;         // job viewer follows the print (vs. the user scrubbing layers)
@@ -71,6 +73,7 @@ static UILabel *PDPL(UIFont *f, UIColor *c, NSTextAlignment a) {
 @property (nonatomic, strong) NSArray *quickBtns;      // Preheat PLA, Preheat PETG, Cool down
 @property (nonatomic, strong) UIButton *lightBtn;
 @property (nonatomic, strong) UILabel *machineNote;
+@property (nonatomic, strong) NSArray *cosmosBtns;     // COSMOS only: Motors off / Restart firmware, Z −, Z +
 @property (nonatomic, strong) UITableView *filesTable;
 @property (nonatomic, strong) NSTimer *attrTimer;
 // canvas
@@ -339,6 +342,16 @@ static UILabel *PDPL(UIFont *f, UIColor *c, NSTextAlignment a) {
 	[self.lightBtn addTarget:self action:@selector(toggleLight) forControlEvents:UIControlEventTouchUpInside];
 	self.machineNote = PDPL([UIFont systemFontOfSize:14], PD_FAINT, NSTextAlignmentLeft);
 	self.machineNote.numberOfLines = 3;
+	NSMutableArray *cb = [NSMutableArray array];
+	NSArray *cl = [NSArray arrayWithObjects:@"Motors off", @"Z −0.02", @"Z +0.02", nil];
+	for (int i = 0; i < 3; i++) {
+		UIButton *b = PDButton([cl objectAtIndex:i], i == 0 ? PD_DIM : PD_ACCENT);
+		b.titleLabel.font = PDBoldFont(15); b.tag = i; b.hidden = YES;
+		b.titleLabel.adjustsFontSizeToFitWidth = YES;
+		[b addTarget:self action:@selector(cosmosAction:) forControlEvents:UIControlEventTouchUpInside];
+		[cb addObject:b]; [self addSubview:b];
+	}
+	self.cosmosBtns = cb;
 
 	// right: per-axis jog rows, home, files
 	self.moveTitle = PDPL(PDLightFont(28), [UIColor whiteColor], NSTextAlignmentLeft);
@@ -680,7 +693,10 @@ static NSString *PDTempText(NSNumber *cur, NSNumber *target) {
 	}
 	// motors: Attributes.DevicesStatus {X,Y,Z}MotorStatus, 1 = driver answering
 	NSDictionary *dev = PDDict(p.attributes, @"DevicesStatus");
-	if (dev) {
+	if (p.cosmos) {   // Klipper reports whether the steppers are powered, not driver health
+		NSString *m = PDStr(st, @"CosmosMotors");
+		[self setTile:6 text:m ? ([m isEqualToString:@"on"] ? @"Powered" : @"Off") : @"–" color:[m isEqualToString:@"on"] ? PD_ACCENT : nil];
+	} else if (dev) {
 		NSMutableArray *bad = [NSMutableArray array];
 		for (int a = 0; a < 3; a++)
 			if ([PDNum(dev, [NSString stringWithFormat:@"%@MotorStatus", PDAxisNames[a]]) intValue] != 1) [bad addObject:PDAxisNames[a]];
@@ -697,6 +713,18 @@ static NSString *PDTempText(NSNumber *cur, NSNumber *target) {
 	[self.lightBtn setTitle:lightOn ? @"Light on" : @"Light off" forState:UIControlStateNormal];
 	[self.lightBtn setTitleColor:lightOn ? PD_AMBER : PD_DIM forState:UIControlStateNormal];
 	self.lightBtn.backgroundColor = [(lightOn ? PD_AMBER : PD_DIM) colorWithAlphaComponent:lightOn ? 0.2 : 0.1];
+	BOOL ready = p.cosmos && p.connected && [p.klippyState isEqualToString:@"ready"];
+	for (UIButton *b in self.cosmosBtns) b.hidden = !p.cosmos;
+	self.machineNote.hidden = p.cosmos;
+	if (p.cosmos) {
+		UIButton *m = [self.cosmosBtns objectAtIndex:0];
+		BOOL down = p.connected && [p.klippyState length] && !ready;
+		[m setTitle:down ? @"Restart firmware" : @"Motors off" forState:UIControlStateNormal];
+		[m setTitleColor:down ? PD_RED : PD_DIM forState:UIControlStateNormal];
+		m.backgroundColor = [(down ? PD_RED : PD_DIM) colorWithAlphaComponent:0.15];
+		m.enabled = down || (ready && !p.isBusy); m.alpha = m.enabled ? 1 : 0.4;
+		for (int i = 1; i < 3; i++) { UIButton *b = [self.cosmosBtns objectAtIndex:i]; b.enabled = ready; b.alpha = ready ? 1 : 0.4; }
+	}
 	if (!p.connected) self.machineNote.text = @"Printer offline.";
 	else if (p.isBusy) self.machineNote.text = [NSString stringWithFormat:@"%@ — moves, homing, preheat and printing are disabled while a job runs.", p.jobStateText];
 	else self.machineNote.text = @"Home before jogging: the printer refuses moves on an unhomed axis. Positions are in printer coordinates.";
@@ -756,6 +784,12 @@ static NSString *PDTempText(NSNumber *cur, NSNumber *target) {
 		default: [p setNozzleTarget:0]; [p setBedTarget:0]; break;
 	}
 }
+- (void)cosmosAction:(UIButton *)b {
+	PDPrinter *p = [PDPrinter shared];
+	if (b.tag == 0) { if ([p.klippyState isEqualToString:@"ready"]) [p motorsOff]; else [p firmwareRestart]; }
+	else [p adjustZOffset:b.tag == 1 ? -0.02 : 0.02];
+}
+
 - (void)toggleLight {
 	PDPrinter *p = [PDPrinter shared];
 	BOOL on = [PDNum(PDDict(p.status, @"LightStatus"), @"SecondLight") intValue] != 0;
@@ -954,6 +988,8 @@ static NSString *PDSlicerTime(NSString *path) {
 - (void)buildCanvas {
 	self.canvasView = [[PDCanvasView alloc] initWithFrame:CGRectZero];
 	self.canvasView.large = YES;
+	self.canvasView.userInteractionEnabled = YES;
+	[self.canvasView addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(canvasTapped:)]];
 	[self addSubview:self.canvasView];
 	NSMutableArray *tiles = [NSMutableArray array];
 	for (NSString *name in [NSArray arrayWithObjects:@"CANVAS", @"FEEDING", @"AUTO-REFILL", @"LOADED SLOTS", nil]) {
@@ -997,6 +1033,59 @@ static NSString *PDSlicerTime(NSString *path) {
 		UILabel *v = [[self.canvasTiles objectAtIndex:i] objectAtIndex:1];
 		v.text = [vals objectAtIndex:i];
 		v.textColor = i == 1 && active >= 0 && u ? PD_ACCENT : [UIColor whiteColor];
+	}
+	self.canvasNote.text = p.cosmos ? @"COSMOS drives the CANVAS as AFC lanes CANVAS_1–4 (tools T0–T3). Tap a slot to set its material and colour; "
+		@"brand and name need a Spoolman server." : @"Read from the printer every few seconds. Load, unload and set each slot's filament on the printer's screen; "
+		@"multi-colour files from ElegooSlicer map their tools to these slots.";
+}
+
+static NSString *const PDLaneMaterials[] = {@"PLA", @"PETG", @"ABS", @"ASA", @"TPU", @"PLA-CF", @"PETG-CF", @"PA"};
+static NSString *const PDLaneColorNames[] = {@"Black", @"White", @"Grey", @"Red", @"Orange", @"Yellow", @"Green", @"Blue", @"Purple", @"Pink", @"Brown"};
+static NSString *const PDLaneColorHex[] = {@"1A1A1A", @"F2F2F2", @"8A8A8A", @"D32F2F", @"F57C00", @"F2C200", @"2E9E44", @"1E63D6", @"7B3FB5", @"E86AA6", @"7A4A2A"};
+
+- (void)canvasTapped:(UITapGestureRecognizer *)g {
+	PDPrinter *p = [PDPrinter shared];
+	NSArray *trays = PDArr([PDCanvasView unitIn:p.canvas], @"tray_list");
+	if (!p.cosmos || ![trays count] || ![p.klippyState isEqualToString:@"ready"]) return;
+	NSUInteger n = MIN((NSUInteger)8, [trays count]);
+	CGFloat w = self.canvasView.bounds.size.width, gap = 16, tw = (w - gap * (n - 1)) / n;
+	[self editLane:(int)floor([g locationInView:self.canvasView].x / (tw + gap))];
+}
+
+- (void)editLane:(int)slot {
+	PDPrinter *p = [PDPrinter shared];
+	NSArray *trays = PDArr([PDCanvasView unitIn:p.canvas], @"tray_list");
+	NSUInteger n = MIN((NSUInteger)8, [trays count]);
+	if (!p.cosmos || slot < 0 || slot >= (int)n || ![p.klippyState isEqualToString:@"ready"]) return;
+	CGFloat w = self.canvasView.bounds.size.width, gap = 16, tw = (w - gap * (n - 1)) / n;
+	_laneSlot = slot; _laneMaterial = nil;
+	UIActionSheet *a = [[UIActionSheet alloc] initWithTitle:[NSString stringWithFormat:@"Slot %d material", slot + 1] delegate:self
+		cancelButtonTitle:nil destructiveButtonTitle:nil otherButtonTitles:nil];
+	for (unsigned i = 0; i < sizeof PDLaneMaterials / sizeof *PDLaneMaterials; i++) [a addButtonWithTitle:PDLaneMaterials[i]];
+	a.cancelButtonIndex = [a addButtonWithTitle:@"Cancel"];
+	a.tag = 10;
+	CGRect r = CGRectMake(slot * (tw + gap), 0, tw, self.canvasView.bounds.size.height / 2);
+	[a showFromRect:r inView:self.canvasView animated:YES];
+}
+
+- (void)actionSheet:(UIActionSheet *)a clickedButtonAtIndex:(NSInteger)i {
+	if (i == a.cancelButtonIndex || i < 0) return;
+	if (a.tag == 10) {
+		_laneMaterial = PDLaneMaterials[i];
+		UIActionSheet *c = [[UIActionSheet alloc] initWithTitle:[NSString stringWithFormat:@"Slot %d colour (%@)", _laneSlot + 1, _laneMaterial] delegate:self
+			cancelButtonTitle:nil destructiveButtonTitle:nil otherButtonTitles:nil];
+		for (unsigned k = 0; k < sizeof PDLaneColorNames / sizeof *PDLaneColorNames; k++) [c addButtonWithTitle:PDLaneColorNames[k]];
+		[c addButtonWithTitle:@"Keep colour"];
+		c.cancelButtonIndex = [c addButtonWithTitle:@"Cancel"];
+		c.tag = 11;
+		NSUInteger n = MAX((NSUInteger)1, [PDArr([PDCanvasView unitIn:[PDPrinter shared].canvas], @"tray_list") count]);
+		CGFloat w = self.canvasView.bounds.size.width, gap = 16, tw = (w - gap * (n - 1)) / n;
+		CGRect r = CGRectMake(_laneSlot * (tw + gap), 0, tw, self.canvasView.bounds.size.height / 2);
+		dispatch_async(dispatch_get_main_queue(), ^{ [c showFromRect:r inView:self.canvasView animated:YES]; });
+	} else if (a.tag == 11) {
+		NSUInteger nc = sizeof PDLaneColorHex / sizeof *PDLaneColorHex;
+		NSString *hex = (NSUInteger)i < nc ? PDLaneColorHex[i] : nil;
+		[[PDPrinter shared] setLane:_laneSlot color:hex material:_laneMaterial];
 	}
 }
 
@@ -1102,6 +1191,8 @@ static NSString *PDSlicerTime(NSString *path) {
 	CGFloat ly = qy + 60;
 	self.lightBtn.frame = CGRectMake(pad, ly, tw, 50);
 	self.machineNote.frame = CGRectMake(pad + tw + g + 2, ly, lw - tw - g - 2, MIN(54, H - ly - 30));
+	CGFloat cw = floor((lw - tw - 3 * g) / 3);
+	for (int i = 0; i < 3; i++) [(UIButton *)[self.cosmosBtns objectAtIndex:i] setFrame:CGRectMake(pad + tw + g + i * (cw + g), ly, i == 0 ? cw : cw, 50)];
 
 	// right column: per-axis rows, then files
 	CGFloat rx = pad + lw + pad, rw = W - rx - pad;

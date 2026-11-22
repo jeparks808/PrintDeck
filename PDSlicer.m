@@ -816,7 +816,7 @@ static void pdt_box(PDTriBuf *b, float x0, float y0, float z0, float x1, float y
 @property (nonatomic, copy) NSString *upMD5, *upUUID, *upFile, *upName, *upHost;
 @property (nonatomic) int upPort;
 @property (nonatomic) long long upOffset, upTotal, upChunk;
-@property (nonatomic) BOOL upPrint;
+@property (nonatomic) BOOL upPrint, upCosmos;
 @end
 
 @implementation PDSlicer
@@ -947,20 +947,32 @@ static int PDum(double mm) { return (int)lround(mm * 1000.0); }
 	NSMutableString *start = [NSMutableString string];
 	[start appendFormat:@";TYPE:Custom\n;===== PrintDeck start (Centauri Carbon) =====\n;printer_model:Elegoo Centauri Carbon\n;initial_filament:%@\n", material];
 	[start appendString:@"M400\nM220 S100\nM221 S100\nM104 S140\n"];
-	[start appendFormat:@"M140 S%d\nG90\nM83\nG28 ;home\nM729 ;clean nozzle\n", bed];
+	// COSMOS (Klipper) e-stops on Elegoo's M729/M8213/M8212 and doesn't know M6211, and its M106 has no P (fan
+	// index): there, fans go by name (SET_FAN_SPEED) and the light by SET_LED, as in COSMOS's own CC1 profile.
+	PDPrinter *pr = [PDPrinter shared];
+	BOOL cosmos = pr.cosmos;
+	NSString *(^fanCmd)(int, double, NSString *) = ^NSString *(int idx, double pct, NSString *note) {
+		NSString *name = idx == 3 ? pr.chamberFanName : pr.auxFanName;
+		if (!cosmos) return [NSString stringWithFormat:@"M106 P%d S%ld ;%@\n", idx, lround(pct * 2.55), note];
+		return name ? [NSString stringWithFormat:@"SET_FAN_SPEED FAN=%@ SPEED=%.2f ;%@\n", name, pct / 100.0, note] : @"";
+	};
+	[start appendFormat:@"M140 S%d\nG90\nM83\nG28 ;home\n%@", bed, cosmos ? @"" : @"M729 ;clean nozzle\n"];
+	if (cosmos && pr.caseLedName) [start appendFormat:@"SET_LED LED=%@ WHITE=1\n", pr.caseLedName];
 	if (bed > 0) [start appendFormat:@"M190 S%d\n", bed];
-	[start appendFormat:@"M109 S%d\nM6211 A1 L200 T0 Q%d R%d S%d\nT0\n", nozzle, nozzle, nozzle, nozzle];
+	if (cosmos) [start appendFormat:@"M109 S%d\n", nozzle];
+	else [start appendFormat:@"M109 S%d\nM6211 A1 L200 T0 Q%d R%d S%d\nT0\n", nozzle, nozzle, nozzle, nozzle];
 	double chamber = V(@"chamberFanPct");
-	if (chamber < 0 && [material isEqualToString:@"PLA"]) [start appendString:bed > 50 ? @"M106 P3 S255 ;chamber fan, keeps PLA from jamming\n" : bed > 45 ? @"M106 P3 S180\n" : @""];
-	else if (chamber > 0) [start appendFormat:@"M106 P3 S%ld ;chamber fan\n", lround(chamber * 2.55)];
-	if (V(@"auxFan") > 0) [start appendFormat:@"M106 P2 S%ld ;aux fan\n", lround(V(@"auxFan") * 2.55)];
+	if (chamber < 0 && [material isEqualToString:@"PLA"]) [start appendString:bed > 50 ? fanCmd(3, 100, @"chamber fan, keeps PLA from jamming") : bed > 45 ? fanCmd(3, 180 / 2.55, @"chamber fan") : @""];
+	else if (chamber > 0) [start appendString:fanCmd(3, chamber, @"chamber fan")];
+	if (V(@"auxFan") > 0) [start appendString:fanCmd(2, V(@"auxFan"), @"aux fan")];
 	[start appendFormat:@"M204 S%ld\n", lround(V(@"acceleration"))];
-	[start appendString:@"G1 X128 Y-1.2 F20000\nG1 Z0.3 F900\nG90\nM83\nG92 E0\nG1 F4800\n"
+	// (Klipper only knows G2/G3 with [gcode_arcs], so COSMOS gets a plain lift instead of the arc.)
+	[start appendFormat:@"G1 X128 Y-1.2 F20000\nG1 Z0.3 F900\nG90\nM83\nG92 E0\nG1 F4800\n"
 		"G1 X0 E10.156 ;prime line\nG1 Y98.8 E7.934\nG1 X0.9 Y100 E0.1\nG1 Y-0.3 E7.934\nG1 X78 E6.284\n"
-		"G3 I-1 J0 Z0.6 F1200.0\nG1 F20000\nG92 E0\nG21\nM82 ;CuraEngine writes absolute E\nG92 E0"];
-	NSString *end = @";TYPE:Custom\n;===== PrintDeck end (Centauri Carbon) =====\nM400\nM140 S0\nM106 S255\nM83\nG92 E0\nG1 E-0.8 F1800\n"
-		"G91\nG1 Z0.5 F3000\nG90\nG1 Z100 F20000\nM204 S5000\nM749\nM400\nG1 X202 F20000\nM400\nG1 Y250 F20000\nG1 Y264.5 F1200\nM400\n"
-		"G92 E0\nM104 S0\nM140 S0\nM106 S0\nM106 P2 S0\nM106 P3 S0\nM84";
+		"%@\nG1 F20000\nG92 E0\nG21\nM82 ;CuraEngine writes absolute E\nG92 E0", cosmos ? @"G1 Z0.6 F1200" : @"G3 I-1 J0 Z0.6 F1200.0"];
+	NSString *end = [NSString stringWithFormat:@";TYPE:Custom\n;===== PrintDeck end (Centauri Carbon) =====\nM400\nM140 S0\nM106 S255\nM83\nG92 E0\nG1 E-0.8 F1800\n"
+		"G91\nG1 Z0.5 F3000\nG90\nG1 Z100 F20000\nM204 S5000\n%@M400\nG1 X202 F20000\nM400\nG1 Y250 F20000\nG1 Y264.5 F1200\nM400\n"
+		"G92 E0\nM104 S0\nM140 S0\nM106 S0\n%@%@M84", cosmos ? @"" : @"M749\n", fanCmd(2, 0, @"aux fan off"), fanCmd(3, 0, @"chamber fan off")];
 	[c appendFormat:@"startCode = \"\"\"\n%@\n\"\"\"\nendCode = \"\"\"\n%@\n\"\"\"\n", start, end];
 	return c;
 }
@@ -1193,14 +1205,37 @@ static NSString *PDFileMD5(NSString *file) {
 	self.upUUID = [(__bridge_transfer NSString *)CFUUIDCreateString(NULL, u) lowercaseString];
 	CFRelease(u);
 	self.upFile = self.resultFile; self.upName = self.resultName;
-	self.upHost = p.host; self.upPort = p.port ?: 3030;
+	self.upHost = p.host; self.upPort = p.cosmos ? p.moonrakerPort : (p.port ?: 3030);
+	self.upCosmos = p.cosmos;
 	self.upOffset = 0; self.upPrint = print;
 	self.uploadState = PDUploadRunning; self.uploadProgress = 0; self.uploadError = nil; self.uploadedName = nil;
 	[self post];
 	[self sendChunk];
 }
 
+// COSMOS: Moonraker takes the whole file in one multipart POST /server/files/upload (root=gcodes) and answers
+// {"item": {"path": …}, "action": "create_file"}.
+- (void)sendCosmosUpload {
+	NSData *file = [NSData dataWithContentsOfFile:self.upFile options:NSDataReadingMappedIfSafe error:NULL];
+	if (![file length]) { [self uploadFailed:@"Couldn't read the sliced file."]; return; }
+	self.upChunk = (long long)[file length];
+	NSString *boundary = [NSString stringWithFormat:@"----printdeck%08x%08x", arc4random(), arc4random()];
+	NSMutableData *body = [NSMutableData data];
+	[body appendData:[[NSString stringWithFormat:@"--%@\r\nContent-Disposition: form-data; name=\"root\"\r\n\r\ngcodes\r\n", boundary] dataUsingEncoding:NSUTF8StringEncoding]];
+	[body appendData:[[NSString stringWithFormat:@"--%@\r\nContent-Disposition: form-data; name=\"file\"; filename=\"%@\"\r\nContent-Type: application/octet-stream\r\n\r\n", boundary, self.upName] dataUsingEncoding:NSUTF8StringEncoding]];
+	[body appendData:file];
+	[body appendData:[[NSString stringWithFormat:@"\r\n--%@--\r\n", boundary] dataUsingEncoding:NSUTF8StringEncoding]];
+	NSURL *url = [[PDPrinter shared] moonrakerURL:@"/server/files/upload"];
+	NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url cachePolicy:NSURLRequestReloadIgnoringLocalCacheData timeoutInterval:300];
+	[req setHTTPMethod:@"POST"];
+	[req setValue:[@"multipart/form-data; boundary=" stringByAppendingString:boundary] forHTTPHeaderField:@"Content-Type"];
+	[req setHTTPBody:body];
+	self.reply = [NSMutableData data];
+	self.conn = [NSURLConnection connectionWithRequest:req delegate:self];
+}
+
 - (void)sendChunk {
+	if (self.upCosmos) { [self sendCosmosUpload]; return; }
 	NSFileHandle *fh = [NSFileHandle fileHandleForReadingAtPath:self.upFile];
 	[fh seekToFileOffset:(unsigned long long)self.upOffset];
 	NSData *chunk = [fh readDataOfLength:PD_UPLOAD_CHUNK];
@@ -1239,6 +1274,16 @@ static NSString *PDFileMD5(NSString *file) {
 	self.conn = nil;
 	id j = [NSJSONSerialization JSONObjectWithData:self.reply options:0 error:NULL];
 	NSString *code = PDStr(j, @"code");
+	if (self.upCosmos) {   // Moonraker: {"item": {"path": "<name>"}, …} or {"error": {"message": …}}
+		NSString *saved = PDStr(PDDict(j, @"item"), @"path") ?: PDStr(PDDict(PDDict(j, @"result"), @"item"), @"path");
+		if (![saved length]) {
+			NSString *msg = PDStr(PDDict(j, @"error"), @"message");
+			[self uploadFailed:[NSString stringWithFormat:@"The printer refused the upload (%@).", msg ?: @"no answer"]];
+			return;
+		}
+		self.upName = saved;
+		code = @"000000";
+	}
 	if (![code isEqualToString:@"000000"]) {
 		NSString *body = [[NSString alloc] initWithData:self.reply encoding:NSUTF8StringEncoding];
 		[self uploadFailed:[NSString stringWithFormat:@"The printer refused the upload (%@).", code ?: ([body length] ? [body substringToIndex:MIN((NSUInteger)80, [body length])] : @"no answer")]];

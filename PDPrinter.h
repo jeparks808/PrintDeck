@@ -84,4 +84,22 @@ typedef enum {
 // stream), and a video connection opened before the reply never starts, so open it from `then`.
 // `then` runs on the main thread once the printer answers, or after 2 s if it doesn't.
 - (void)enableVideoStream:(void (^)(void))then;
+
+// COSMOS (OpenCentauri's Klipper + Moonraker firmware). On connect PrintDeck asks GET /server/info on port 80 (or on
+// the given port when it isn't 3030); a Moonraker answer switches this printer to COSMOS mode. In that mode the
+// same SDCP-shaped status / attributes / files / lastTask / canvas / fileDetail are filled from Moonraker
+// (JSON-RPC over ws://host/websocket), and every command above becomes Moonraker calls or G-code, so the pages
+// don't need to know which firmware is on the other end. Files keep their "/local/<name>" paths.
+@property (nonatomic, readonly) BOOL cosmos;
+@property (nonatomic, readonly, copy) NSString *klippyState;    // "ready", "startup", "shutdown", "error" (COSMOS)
+@property (nonatomic, readonly, copy) NSString *klippyMessage;
+@property (nonatomic, readonly) int moonrakerPort;
+@property (nonatomic, readonly, copy) NSString *auxFanName, *chamberFanName, *caseLedName;  // discovered Klipper names
+- (NSURL *)moonrakerURL:(NSString *)pathAndQuery;               // http://host:port<pathAndQuery>
+- (void)runGcode:(NSString *)script;                            // printer.gcode.script; an error posts an "error" event
+// COSMOS only (no SDCP equivalent):
+- (void)setLane:(int)slot color:(NSString *)hex material:(NSString *)material;  // AFC SET_COLOR / SET_MATERIAL, slot 0..3
+- (void)adjustZOffset:(double)mm;    // SET_GCODE_OFFSET Z_ADJUST= (MOVE=1 while printing)
+- (void)motorsOff;                   // M84
+- (void)firmwareRestart;             // FIRMWARE_RESTART, after a Klipper shutdown
 @end

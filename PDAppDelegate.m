@@ -1,4 +1,5 @@
 #import "PDAppDelegate.h"
+#import "PDCardPage.h"
 #import <GLKit/GLKit.h>
 #import "PDToolpathView.h"
 #import "PDMainViewController.h"
@@ -189,6 +190,9 @@ static void PDDrawGLViews(UIView *root, UIView *v) {
 				}
 			}
 		}
+	} else if ([cmd isEqualToString:@"lane"]) {   // developer aid: on the CANVAS page, open slot n's (1-based) material/colour picker
+		PDCardPage *pg = (PDCardPage *)PDFindView(self.window, [PDCardPage class]);
+		if ([pg.kind isEqualToString:@"canvas"]) [pg editLane:[[q objectForKey:@"slot"] intValue] - 1];
 	} else if ([cmd isEqualToString:@"drag"]) {   // developer aid: drag on the Design canvas, screen points x0,y0 -> x1,y1
 		PDDesignView *dv = (PDDesignView *)PDFindView(self.window, [PDDesignView class]);
 		UIView *root = self.window.rootViewController.view;

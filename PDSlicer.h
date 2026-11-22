@@ -121,7 +121,7 @@ typedef enum { PDUploadIdle, PDUploadRunning, PDUploadDone, PDUploadFailed } PDU
 @property (nonatomic, readonly, strong) PDToolpath *resultToolpath;   // for the preview
 - (NSString *)currentSignature;              // compare with resultSignature: is the result stale?
 
-// Uploading the result to the printer (SDCP HTTP upload, port 3030)
+// Uploading the result to the printer (SDCP HTTP upload on port 3030, or Moonraker's /server/files/upload on COSMOS)
 @property (nonatomic, readonly) PDUploadState uploadState;
 @property (nonatomic, readonly) double uploadProgress;
 @property (nonatomic, readonly, copy) NSString *uploadError, *uploadedName;

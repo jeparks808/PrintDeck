@@ -637,7 +637,8 @@ static const int PDSpeeds[] = {50, 100, 130, 160};
 	self.stateLabel.layer.borderColor = [sc colorWithAlphaComponent:0.6].CGColor;
 	self.stateLabel.backgroundColor = [sc colorWithAlphaComponent:0.12];
 	self.dot.backgroundColor = p.connected ? PD_GREEN : PD_RED;
-	self.hostLabel.text = p.host ? [NSString stringWithFormat:@"%@%@", p.host, p.port != 3030 ? [NSString stringWithFormat:@":%d", p.port] : @""] : @"not connected";
+	if (p.cosmos) self.hostLabel.text = [NSString stringWithFormat:@"%@%@ · COSMOS", p.host, p.moonrakerPort != 80 ? [NSString stringWithFormat:@":%d", p.moonrakerPort] : @""];
+	else self.hostLabel.text = p.host ? [NSString stringWithFormat:@"%@%@", p.host, p.port != 3030 ? [NSString stringWithFormat:@":%d", p.port] : @""] : @"not connected";
 
 	// temperatures
 	[self.nozzleCard setCurrent:PDNum(st, @"TempOfNozzle") target:PDNum(st, @"TempTargetNozzle")];

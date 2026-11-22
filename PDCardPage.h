@@ -12,4 +12,6 @@
 @property (nonatomic, copy, readonly) NSString *kind;
 @property (nonatomic, copy) void (^backHandler)(void);
 - (id)initWithKind:(NSString *)kind;
+// CANVAS page on COSMOS: ask for slot `slot`'s material, then colour, and set it (what a tap on the slot does).
+- (void)editLane:(int)slot;
 @end
