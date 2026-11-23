@@ -466,7 +466,12 @@ bundled handy models and slicer profiles keep their own authors' terms (see belo
 
 ## Credits
 
-Built by jeparks808 with Claude Code (Anthropic).
+**Contributors**
+- [jeparks808](https://github.com/jeparks808): creator and maintainer. Owns the project, its design and direction,
+  and tests everything on the real printer and iPad.
+- [Claude](https://github.com/claude) (Anthropic's AI, through Claude Code): co-wrote the code, the reverse
+  engineering (SDCP, ElegooSlicer's flushing rule, the printer's web page) and the docs. It is credited on every
+  commit as a co-author.
 
 The Design page's handy models (Resources/HandyModels) come from ElegooSlicer 1.5.3.5's `resources/handy_models`
 (as bundled with OrcaSlicer: the KSR FDM test, Orca cube and tolerance/stringing tests, Voron Design Cube v7,
