@@ -21,7 +21,7 @@ scp -O meshbridge.py root@<printer-ip>:/tmp/        # password: OpenCentauri
 ssh root@<printer-ip> '/kip/bin/python3 /tmp/meshbridge.py --port 7140'
 ```
 
-It prints the profiles it found and serves on `0.0.0.0:7140`. Leave it running (or see "Start on boot").
+It prints the profiles it found and serves on `0.0.0.0:7140`. Leave it running, or see "Start on boot" to install it permanently.
 
 ## Point PrintDeck at it
 
@@ -42,13 +42,15 @@ keeps several (per build plate / bed temp). `GET /` lists them; pass `?profile=N
 `meshbridge` re-reads the files on every request, so running `BED_MESH_CALIBRATE` + saving on the
 printer and then tapping **Refresh** shows the new mesh.
 
-## Start on boot (optional)
+## Start on boot
 
-Add to the printer's startup (e.g. an init script or a `@reboot`-style hook, depending on the firmware):
-
-```bash
-/kip/bin/python3 /tmp/meshbridge.py --port 7140 &
-```
+`tools/install-meshbridge.sh [printer-ip]` (in the PrintDeck repo) does it all: it asks for the root password
+once, copies the script to `/kip/share/meshbridge/meshbridge.py`, and installs `/kip/etc/init.d/S90meshbridge`.
+OpenCentauri's boot script (`/etc/init.d/oc-bootstrap`) mounts Kipware from the persistent `/user-resource`
+partition on `/kip` and runs `/kip/etc/init.d/rc.unslung start`, which starts every `S??*` script there, so
+meshbridge comes up at every power-on, survives firmware updates, and is restarted if it exits. On the printer:
+`/kip/etc/init.d/S90meshbridge start|stop|restart|check`; its log is `/tmp/meshbridge.log`.
+`tools/install-meshbridge.sh <ip> --remove` takes it out again.
 
 ## Test off-device
 
