@@ -9,6 +9,9 @@ fails or pauses by itself, it shows a full-screen alert and plays a sound. It al
 iPad** with four CANVAS filament slots ([Slice](#slice)), has a Tinkercad-style **Design** page with handy test
 models ([Design](#design)), and shows the **bed mesh** in 3D ([Bed mesh](#bed-mesh)).
 
+**What it adds over the printer's web page and ElegooSlicer**, with screenshots of each page:
+[docs/FEATURES.md](docs/FEATURES.md).
+
 **Pause** and **Stop** sit in the top bar above the camera. The left column is the camera with the **CANVAS
 card** beside it (the four slots of Elegoo's filament changer: colour, type, brand, which slot is feeding), a compact **job
 card** (thumbnail, name, one status line with time left and finish time, progress, layer/elapsed), the
