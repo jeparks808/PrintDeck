@@ -4,9 +4,11 @@
 #import "PDUtil.h"
 #import "PDPrinter.h"
 #import <QuartzCore/QuartzCore.h>
+#import "PDBedShape.h"
 #include <math.h>
 
 static NSString *const PDMeshInvertKey = @"PDMeshInvertScrew";
+static const double PDMeshPlate = 256.0;  // mm, the printable square
 static const double PDScrewPitch = 0.5;  // mm per full turn (M3 leveling screw; most of these beds)
 
 // Diverging colour: t in [-1,1], blue (low) -> green (on plane) -> red (high).
@@ -57,7 +59,8 @@ static NSString *PDTurns(double turns) {
 	return self;
 }
 
-- (void)resetView { self.azimuth = 0.62; self.elevation = 0.95; self.zoom = 1.0; [self setNeedsDisplay]; }
+- (void)resetView { self.azimuth = M_PI - 0.45; self.elevation = 0.95;  // from the front-left, as you stand at the printer
+	 self.zoom = 1.0; [self setNeedsDisplay]; }
 
 - (void)pan:(UIPanGestureRecognizer *)g {
 	CGPoint t = [g translationInView:self];
@@ -73,74 +76,113 @@ static NSString *PDTurns(double turns) {
 	[self setNeedsDisplay];
 }
 
+// The whole plate is drawn to scale (the Centauri Carbon's real outline from PDBedShape.h and its 256 mm printable
+// square), and the probed area sits where it really is on it: one grid line and one dot per probe point, at the
+// X/Y the printer probed (mesh_min..mesh_max, x_count × y_count), so the spacing and the unprobed margins are true.
 - (void)drawRect:(CGRect)rect {
 	PDMesh *m = self.mesh;
 	CGContextRef ctx = UIGraphicsGetCurrentContext();
 	CGRect b = self.bounds;
 	if (!m || m.nx < 2 || m.ny < 2) return;
 	NSUInteger nx = m.nx, ny = m.ny, N = nx * ny;
-	double cx = (m.minX + m.maxX) / 2, cy = (m.minY + m.maxY) / 2, mean = m.mean;
-	double bedMax = MAX(m.maxX - m.minX, m.maxY - m.minY);
+	const double S = PDMeshPlate, cx = S / 2, cy = S / 2;
+	double mean = m.mean;
 	double maxAbs = MAX(fabs(m.max - mean), fabs(mean - m.min));
 	if (maxAbs < 1e-6) maxAbs = 1e-6;
-	double zExagg = 0.26 * bedMax / maxAbs;   // auto: relief fills ~a quarter of the model height
+	double zExagg = 0.12 * S / maxAbs;   // auto: the relief is about a quarter of the plate width, top to bottom
 	double az = self.azimuth, el = self.elevation, ca = cos(az), sa = sin(az), ce = cos(el), se = sin(el);
-	double scale = MIN(b.size.width, b.size.height) * 0.34 * self.zoom;
+	double scale = MIN(b.size.width, b.size.height) * 0.56 * self.zoom;
 	double ox = b.size.width / 2, oy = b.size.height * 0.54;
-
-	CGPoint *P = malloc(sizeof(CGPoint) * N);
-	double *dev = malloc(sizeof(double) * N);
 	#define PROJ(X, Y, Z, OUTP, OUTDEPTH) do { \
 		double rx = (X) * ca - (Y) * sa, ry = (X) * sa + (Y) * ca, rz = (Z); \
 		double sx = rx, sy = rz * ce - ry * se; OUTDEPTH = ry * ce + rz * se; \
 		OUTP = CGPointMake(ox + scale * sx, oy - scale * sy); } while (0)
+	// printer mm -> model units. PROJ is a mirror image (its screen axes are left-handed), so X is negated to
+	// undo that: the bed's left stays on the left as seen from the front.
+	#define BED(XMM, YMM, ZU, OUTP) do { double _d; PROJ(-((XMM) - cx) / S, ((YMM) - cy) / S, (ZU), OUTP, _d); (void)_d; } while (0)
 
+	double baseZ = (m.min - mean) * zExagg / S - 0.02;
+
+	// the plate: printable square filled faintly, the physical outline (tabs and all) and the 0/256 corner marks
+	CGPoint sq[4];
+	double sxv[4] = {0, S, S, 0}, syv[4] = {0, 0, S, S};
+	for (int i = 0; i < 4; i++) BED(sxv[i], syv[i], baseZ, sq[i]);
+	CGContextMoveToPoint(ctx, sq[0].x, sq[0].y);
+	for (int i = 1; i < 4; i++) CGContextAddLineToPoint(ctx, sq[i].x, sq[i].y);
+	CGContextClosePath(ctx);
+	CGContextSetFillColorWithColor(ctx, [UIColor colorWithWhite:1 alpha:0.05].CGColor);
+	CGContextSetStrokeColorWithColor(ctx, [UIColor colorWithWhite:1 alpha:0.16].CGColor);
+	CGContextSetLineWidth(ctx, 1.0);
+	CGContextDrawPath(ctx, kCGPathFillStroke);
+	for (int i = 0; i < PDBedEdgeCount; i++) {
+		CGPoint p0, p1;
+		BED(PDBedOutline[i * 4], PDBedOutline[i * 4 + 1], baseZ, p0);
+		BED(PDBedOutline[i * 4 + 2], PDBedOutline[i * 4 + 3], baseZ, p1);
+		CGContextMoveToPoint(ctx, p0.x, p0.y);
+		CGContextAddLineToPoint(ctx, p1.x, p1.y);
+	}
+	CGContextSetStrokeColorWithColor(ctx, [UIColor colorWithWhite:1 alpha:0.30].CGColor);
+	CGContextStrokePath(ctx);
+	// the probed area's footprint on the plate (dashed)
+	CGPoint fp[4];
+	double fxv[4] = {m.minX, m.maxX, m.maxX, m.minX}, fyv[4] = {m.minY, m.minY, m.maxY, m.maxY};
+	for (int i = 0; i < 4; i++) BED(fxv[i], fyv[i], baseZ, fp[i]);
+	CGFloat dash[2] = {4, 4};
+	CGContextSetLineDash(ctx, 0, dash, 2);
+	CGContextMoveToPoint(ctx, fp[0].x, fp[0].y);
+	for (int i = 1; i < 4; i++) CGContextAddLineToPoint(ctx, fp[i].x, fp[i].y);
+	CGContextClosePath(ctx);
+	CGContextSetStrokeColorWithColor(ctx, [UIColor colorWithWhite:1 alpha:0.22].CGColor);
+	CGContextStrokePath(ctx);
+	CGContextSetLineDash(ctx, 0, NULL, 0);
+	// the plate's origin (drawn now so the surface covers them when it's in front)
+	[[UIColor colorWithWhite:1 alpha:0.40] set];
+	UIFont *small = [UIFont systemFontOfSize:11];
+	[@"0, 0" drawAtPoint:CGPointMake(sq[0].x - 12, sq[0].y + 4) withFont:small];
+
+	// surface vertices: exactly the probe points
+	CGPoint *P = malloc(sizeof(CGPoint) * N);
+	double *dev = malloc(sizeof(double) * N);
 	for (NSUInteger gy = 0; gy < ny; gy++)
 		for (NSUInteger gx = 0; gx < nx; gx++) {
 			double x = m.minX + (m.maxX - m.minX) * gx / (double)(nx - 1);
 			double y = m.minY + (m.maxY - m.minY) * gy / (double)(ny - 1);
 			double zv = [m zAtCol:gx row:gy];
-			double X = -(x - cx) / bedMax, Y = (y - cy) / bedMax, Z = (zv - mean) * zExagg / bedMax;  // -X: bed left on the viewer's left
-			double depth; CGPoint p; PROJ(X, Y, Z, p, depth);
-			NSUInteger i = gy * nx + gx; P[i] = p; dev[i] = zv - mean;
+			NSUInteger i = gy * nx + gx;
+			BED(x, y, (zv - mean) * zExagg / S, P[i]);
+			dev[i] = zv - mean;
 		}
 
-	// faint base plane (at the lowest surface level) for depth, with posts up to the surface corners
-	double baseZ = (m.min - mean) * zExagg / bedMax - 0.02;
-	CGPoint corners[4]; double cd;
-	double hx[4] = {-0.5, 0.5, 0.5, -0.5}, hy[4] = {-0.5, -0.5, 0.5, 0.5};
-	for (int i = 0; i < 4; i++) PROJ(-hx[i] * (m.maxX - m.minX) / bedMax, hy[i] * (m.maxY - m.minY) / bedMax, baseZ, corners[i], cd);
-	CGContextSetStrokeColorWithColor(ctx, [UIColor colorWithWhite:1 alpha:0.14].CGColor);
-	CGContextSetLineWidth(ctx, 1.0);
-	CGContextMoveToPoint(ctx, corners[0].x, corners[0].y);
-	for (int i = 1; i < 4; i++) CGContextAddLineToPoint(ctx, corners[i].x, corners[i].y);
-	CGContextClosePath(ctx); CGContextStrokePath(ctx);
+	// posts from the footprint corners up to the surface corners
 	NSUInteger cornerIdx[4] = {0, nx - 1, N - 1, N - nx};  // FL, FR, BR, BL in grid terms
 	for (int i = 0; i < 4; i++) {
-		CGContextMoveToPoint(ctx, corners[i].x, corners[i].y);
+		CGContextMoveToPoint(ctx, fp[i].x, fp[i].y);
 		CGContextAddLineToPoint(ctx, P[cornerIdx[i]].x, P[cornerIdx[i]].y);
 	}
+	CGContextSetStrokeColorWithColor(ctx, [UIColor colorWithWhite:1 alpha:0.14].CGColor);
 	CGContextStrokePath(ctx);
 
-	// quads, painter's algorithm (far first)
+	// quads between neighbouring probe points, painter's algorithm (far first); each quad's dots are drawn
+	// with it, so dots behind a fold are covered like the surface is
 	NSUInteger qn = (nx - 1) * (ny - 1), qi = 0;
 	typedef struct { NSUInteger a, bb, c, d; double depth, dev; } Quad;
 	Quad *Q = malloc(sizeof(Quad) * qn);
 	for (NSUInteger gy = 0; gy + 1 < ny; gy++)
 		for (NSUInteger gx = 0; gx + 1 < nx; gx++) {
 			NSUInteger a = gy * nx + gx, bb = gy * nx + gx + 1, c = (gy + 1) * nx + gx + 1, d = (gy + 1) * nx + gx;
-			double X = -(m.minX + (m.maxX - m.minX) * (gx + 0.5) / (nx - 1) - cx) / bedMax;
-			double Y = (m.minY + (m.maxY - m.minY) * (gy + 0.5) / (ny - 1) - cy) / bedMax;
-			double Z = ((dev[a] + dev[bb] + dev[c] + dev[d]) / 4) * zExagg / bedMax;
-			double depth; CGPoint pp; PROJ(X, Y, Z, pp, depth); (void)pp;
-			Q[qi].a = a; Q[qi].bb = bb; Q[qi].c = c; Q[qi].d = d; Q[qi].depth = depth;
-			Q[qi].dev = (dev[a] + dev[bb] + dev[c] + dev[d]) / 4;
+			double X = -(m.minX + (m.maxX - m.minX) * (gx + 0.5) / (nx - 1) - cx) / S;
+			double Y = (m.minY + (m.maxY - m.minY) * (gy + 0.5) / (ny - 1) - cy) / S;
+			double qd = (dev[a] + dev[bb] + dev[c] + dev[d]) / 4;
+			double depth; CGPoint pp; PROJ(X, Y, qd * zExagg / S, pp, depth); (void)pp;
+			Q[qi].a = a; Q[qi].bb = bb; Q[qi].c = c; Q[qi].d = d; Q[qi].depth = depth; Q[qi].dev = qd;
 			qi++;
 		}
-	for (NSUInteger i = 0; i + 1 < qn; i++)  // insertion sort by depth desc (qn tiny)
+	for (NSUInteger i = 0; i + 1 < qn; i++)  // selection sort, far first: PROJ's depth grows toward the viewer
 		for (NSUInteger j = i + 1; j < qn; j++)
-			if (Q[j].depth > Q[i].depth) { Quad t = Q[i]; Q[i] = Q[j]; Q[j] = t; }
+			if (Q[j].depth < Q[i].depth) { Quad t = Q[i]; Q[i] = Q[j]; Q[j] = t; }
 
+	CGFloat r = MAX(1.2, MIN(2.4, scale * 0.0028 * 11 / MAX(nx, ny)));  // dot size follows the zoom and the probe spacing
+	CGContextSetLineWidth(ctx, 1.0);
 	for (NSUInteger i = 0; i < qn; i++) {
 		Quad q = Q[i];
 		CGContextMoveToPoint(ctx, P[q.a].x, P[q.a].y);
@@ -148,22 +190,24 @@ static NSString *PDTurns(double turns) {
 		CGContextAddLineToPoint(ctx, P[q.c].x, P[q.c].y);
 		CGContextAddLineToPoint(ctx, P[q.d].x, P[q.d].y);
 		CGContextClosePath(ctx);
-		CGContextSetFillColorWithColor(ctx, [PDMeshColor(q.dev / maxAbs) colorWithAlphaComponent:0.88].CGColor);
-		CGContextSetStrokeColorWithColor(ctx, [UIColor colorWithWhite:0 alpha:0.28].CGColor);
-		CGContextSetLineWidth(ctx, 1.0);
+		CGContextSetFillColorWithColor(ctx, [PDMeshColor(q.dev / maxAbs) colorWithAlphaComponent:0.90].CGColor);
+		CGContextSetStrokeColorWithColor(ctx, [UIColor colorWithWhite:0 alpha:0.35].CGColor);
 		CGContextDrawPath(ctx, kCGPathFillStroke);
+		NSUInteger v[4] = {q.a, q.bb, q.c, q.d};
+		CGContextSetFillColorWithColor(ctx, [UIColor colorWithWhite:1 alpha:0.75].CGColor);
+		for (int k = 0; k < 4; k++) CGContextFillEllipseInRect(ctx, CGRectMake(P[v[k]].x - r, P[v[k]].y - r, 2 * r, 2 * r));
 	}
 
-	// corner letters
+	// corner letters at the probed corners
 	NSArray *labels = [NSArray arrayWithObjects:@"FL", @"FR", @"BR", @"BL", nil];
+	[[UIColor colorWithWhite:1 alpha:0.85] set];
 	for (int i = 0; i < 4; i++) {
-		UILabel *tmp = nil; (void)tmp;
-		NSString *s = [labels objectAtIndex:i];
 		CGPoint p = P[cornerIdx[i]];
-		[[UIColor colorWithWhite:1 alpha:0.85] set];
-		[s drawAtPoint:CGPointMake(p.x - 8, p.y - 24) withFont:[UIFont boldSystemFontOfSize:13]];
+		[[labels objectAtIndex:i] drawAtPoint:CGPointMake(p.x - 8, p.y - 24) withFont:[UIFont boldSystemFontOfSize:13]];
 	}
 	free(P); free(dev); free(Q);
+	#undef BED
+	#undef PROJ
 }
 
 @end
@@ -175,7 +219,7 @@ static NSString *PDTurns(double turns) {
 	UIView *_pasteOverlay;
 }
 @property (nonatomic, strong) UIButton *backButton;
-@property (nonatomic, strong) UILabel *titleLabel, *clockLabel, *profileLabel, *devLabel, *hintLabel;
+@property (nonatomic, strong) UILabel *titleLabel, *clockLabel, *profileLabel, *devLabel, *hintLabel, *probeLabel;
 @property (nonatomic, strong) PDMeshCanvas *canvas;
 @property (nonatomic, strong) UIView *legend;
 @property (nonatomic, strong) UILabel *legendLo, *legendHi;
@@ -212,6 +256,8 @@ static NSString *PDTurns(double turns) {
 
 		self.devLabel = PDLabel(PDLightFont(30), [UIColor whiteColor]);
 		self.hintLabel = PDLabel([UIFont systemFontOfSize:13], PD_FAINT);
+		self.probeLabel = PDLabel([UIFont systemFontOfSize:14], PD_DIM);
+		self.probeLabel.numberOfLines = 2;
 		self.hintLabel.numberOfLines = 3;
 		self.legend = [[UIView alloc] initWithFrame:CGRectZero];
 		self.legend.layer.cornerRadius = 4;
@@ -238,7 +284,7 @@ static NSString *PDTurns(double turns) {
 		[self.flipBtn addTarget:self action:@selector(flipScrew) forControlEvents:UIControlEventTouchUpInside];
 
 		for (UIView *v in [NSArray arrayWithObjects:self.backButton, self.titleLabel, self.clockLabel, self.profileLabel,
-				self.canvas, self.devLabel, self.hintLabel, self.legend, self.legendLo, self.legendHi,
+				self.canvas, self.devLabel, self.probeLabel, self.hintLabel, self.legend, self.legendLo, self.legendHi,
 				self.refreshBtn, self.pasteBtn, self.demoBtn, self.flipBtn, nil]) [self addSubview:v];
 		for (UILabel *l in rows) [self addSubview:l];
 
@@ -301,6 +347,10 @@ static NSString *PDTurns(double turns) {
 	self.profileLabel.adjustsFontSizeToFitWidth = YES;
 	if (!m) { self.devLabel.text = @"–"; return; }
 	self.devLabel.text = [NSString stringWithFormat:@"range %.3f mm", m.range];
+	double stepX = (m.maxX - m.minX) / (m.nx - 1), stepY = (m.maxY - m.minY) / (m.ny - 1);
+	NSString *step = fabs(stepX - stepY) < 0.05 ? [NSString stringWithFormat:@"%.1f mm", stepX] : [NSString stringWithFormat:@"%.1f × %.1f mm", stepX, stepY];
+	self.probeLabel.text = [NSString stringWithFormat:@"%lu × %lu probe points, every %@\nX %.0f–%.0f mm, Y %.0f–%.0f mm of the 256 mm plate",
+		(unsigned long)m.nx, (unsigned long)m.ny, step, m.minX, m.maxX, m.minY, m.maxY];
 	double maxAbs = MAX(fabs(m.max - m.mean), fabs(m.mean - m.min));
 	self.legendLo.text = [NSString stringWithFormat:@"%+.3f", -maxAbs];
 	self.legendHi.text = [NSString stringWithFormat:@"%+.3f", maxAbs];
@@ -350,7 +400,8 @@ static NSString *PDTurns(double turns) {
 	y += 18;
 	self.legendLo.frame = CGRectMake(px, y, pw / 2, 16);
 	self.legendHi.frame = CGRectMake(px + pw / 2, y, pw / 2, 16);
-	y += 28;
+	y += 24;
+	self.probeLabel.frame = CGRectMake(px, y, pw, 38); y += 48;
 	for (int i = 0; i < 4; i++) { [(UILabel *)[self.screwRows objectAtIndex:i] setFrame:CGRectMake(px, y, pw, 26)]; y += 28; }
 	y += 6;
 	self.hintLabel.frame = CGRectMake(px, y, pw, 66); y += 74;

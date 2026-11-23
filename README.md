@@ -297,7 +297,11 @@ Open it from the **Design** card (or `printdeck://design[?name=<design>]`).
 - **Send to slicer** writes the solids' union as `<name> (design).stl` with your STLs and opens it on the Slice
   page (it warns about holes that aren't grouped with anything).
 ## Bed mesh
-A rotatable 3D height map of the bed, with hints for tramming the **4 spring-loaded corner screws**.
+A rotatable 3D height map of the bed, with hints for tramming the **4 spring-loaded corner screws**. It is drawn to
+scale on the Centauri Carbon's real plate (outline from `PDBedShape.h`, plus the 256 mm printable square). The probed
+area sits at its real position (`mesh_min`..`mesh_max`), with one grid line and one dot per probe point. The panel
+states the probe count, spacing and X/Y range ("11 × 11 probe points, every 22.6 mm · X 20–246 mm, Y 20–246 mm"), and
+the view opens from the front-left, as you stand at the printer.
 Open it from the **Bed** detail page's **Bed mesh** button or `printdeck://mesh`. Drag the model to
 rotate, pinch to zoom, double-tap to reset; ‹ PrintDeck or a swipe off the model goes back. The panel
 names the highest corner as the reference and, for each other corner, the rise needed and the screw
