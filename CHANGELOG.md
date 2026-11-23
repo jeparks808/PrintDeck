@@ -3,6 +3,13 @@
 Each release's .deb is attached to its [GitHub release](https://github.com/jeparks808/PrintDeck/releases). To install
 it on a jailbroken iPad (iOS 5), copy it over, run `dpkg -i` as root, then run `su mobile -c uicache`.
 
+## 0.2.2 (23 Nov 2026)
+- Release builds no longer carry the builder's own slicer presets (`Resources/ImportedPresets.plist`, made by
+  `tools/import-user-presets.py`). That file is now kept out of git, and `make package FINALPACKAGE=1` leaves it out.
+  Use the script to import your own ElegooSlicer and OrcaSlicer presets into a build of your own.
+- The README has a work-in-progress note, OpenCentauri's default SSH login, a License section (AGPL-3.0) and a
+  Contributors list.
+
 ## 0.2.1 (23 Nov 2026)
 - **Bed mesh drawn to scale on the real plate.** The view shows the Centauri Carbon's plate outline and its 256 mm
   printable square, and places the probed area where the printer probed it. There is one grid line and one dot per
