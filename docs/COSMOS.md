@@ -12,7 +12,7 @@ printer (`sim/cosmos_sim.py`), and SDCP still works with the real OpenCentauri p
 ## 1. Backup and rollback
 
 ### Before installing
-1. **Back up the printer.** Run this, and type the printer's root password when asked:
+1. **Back up the printer.** Run this, and type the printer's root password when asked (OpenCentauri's default is `OpenCentauri`, case sensitive; the user is `root`):
    ```bash
    tools/backup-printer.sh 192.168.0.185 --full
    ```

@@ -14,10 +14,11 @@ GET /                      -> {"default":NAME, "profiles":[{"name","nx","ny","ra
 
 ## Run it on the printer
 
-The printer has Python 3 at `/kip/bin/python3`. Copy the script over and start it:
+The printer has Python 3 at `/kip/bin/python3`. OpenCentauri's default SSH login is user `root`, password
+`OpenCentauri` (case sensitive); change it with `passwd` once you're in. Copy the script over and start it:
 
 ```bash
-scp -O meshbridge.py root@<printer-ip>:/tmp/        # asks for the printer's root password
+scp -O meshbridge.py root@<printer-ip>:/tmp/        # password: OpenCentauri (the default)
 ssh root@<printer-ip> '/kip/bin/python3 /tmp/meshbridge.py --port 7140'
 ```
 
