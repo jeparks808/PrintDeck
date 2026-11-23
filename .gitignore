@@ -7,6 +7,9 @@ packages/
 # CuraEngine cross-build output (engine/build.sh)
 engine/build/
 
+# Your own slicer presets (tools/import-user-presets.py); kept out of git and out of release builds
+Resources/ImportedPresets.plist
+
 # Python
 __pycache__/
 *.pyc

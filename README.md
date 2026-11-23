@@ -165,7 +165,8 @@ Slice models **on the iPad** and send them to the printer. Open it with **Sliceâ
   and rebuild to pick up newer ones.
   `tools/import-user-presets.py` does the same for the **user presets** saved in ElegooSlicer and OrcaSlicer on the
   build computer (`~/.config/{ElegooSlicer,OrcaSlicer}/user`, resolved through each slicer's own system profiles,
-  filament colours included) into `Resources/ImportedPresets.plist`; the app adds them to its user presets once
+  filament colours included) into `Resources/ImportedPresets.plist`, which stays on your computer (it isn't in git,
+  and release builds, `make package FINALPACKAGE=1`, leave it out). The app adds them to its user presets once
   ("From ElegooSlicer" in the lists; one you delete stays deleted). Presets for other printers (the Centauri
   Carbon 2) are skipped.
 - **Filament slots (CANVAS).** The Filament panel has four numbered rows, one per CANVAS slot, each with a colour

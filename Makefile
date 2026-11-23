@@ -22,6 +22,11 @@ include $(THEOS_MAKE_PATH)/application.mk
 
 after-stage::
 	@cp engine/build/CuraEngine $(THEOS_STAGING_DIR)/Applications/PrintDeck.app/CuraEngine
+# Resources/ImportedPresets.plist holds the builder's own slicer presets (tools/import-user-presets.py, not in git).
+# Development builds carry it; release builds (FINALPACKAGE=1) never do.
+ifeq ($(FINALPACKAGE),1)
+	@rm -f $(THEOS_STAGING_DIR)/Applications/PrintDeck.app/ImportedPresets.plist
+endif
 
 after-install::
 	install.exec "su mobile -c uicache; sleep 1; su mobile -c 'uiopen printdeck://'"

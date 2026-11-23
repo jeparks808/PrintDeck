@@ -1,6 +1,6 @@
 Package: local.ipadjailbreak.printdeck
 Name: PrintDeck
-Version: 0.2.1
+Version: 0.2.2
 Architecture: iphoneos-arm
 Description: Live panel, on-device slicer and 3D modeller for an Elegoo Centauri Carbon.
 Maintainer: local
