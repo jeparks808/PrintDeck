@@ -340,7 +340,7 @@ static NSString *PDMeshStamp(void) {
 		}
 		[rows addObject:row];
 	}
-	PDMesh *m = [[PDMesh alloc] initWithRows:rows minX:20 minY:20 maxX:200 maxY:200 profile:@"demo"];
+	PDMesh *m = [[PDMesh alloc] initWithRows:rows minX:20 minY:20 maxX:246 maxY:246 profile:@"demo"];
 	[self setOriginText:@"demo mesh"];
 	[self applyMesh:m error:nil];
 	self.lastFetchUnchanged = NO;

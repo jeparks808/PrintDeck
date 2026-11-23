@@ -45,8 +45,12 @@ the part sits on the bed.
 **Not available in the printer's web page or in ElegooSlicer.** The web page only reports that levelling ran.
 The firmware has no command that returns the mesh.
 
-- A rotatable 3D height map of the probed grid (11 × 11 here), coloured blue → green → red around the mean, with
-  the total range (1.441 mm on this bed).
+- A rotatable 3D height map drawn **to scale on the Centauri Carbon's real plate** (its outline and the 256 mm
+  printable square). The probed area sits where the printer probed it, and every grid line and white dot is an actual
+  probe point: 11 × 11 points every 22.6 mm, from X/Y 20 to 246 mm on this printer. The dashed line shows the
+  footprint of the probed area, so you can see the margins that aren't probed.
+- It opens looking from the front-left, as you stand at the printer. It's coloured blue → green → red around the mean,
+  with the total range (1.441 mm on this bed).
 - **Tramming hints** for the four spring-loaded corner screws. The highest corner is the reference. For every
   other corner it shows how much it must rise and how far to turn the screw: "raise 1.367 → loosen 2¾" for an M3
   screw at 0.5 mm per turn. **Flip** swaps loosen and tighten if your screws work the other way round.
