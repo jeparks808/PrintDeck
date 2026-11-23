@@ -1,11 +1,13 @@
 # PrintDeck
 
-A live panel for an **Elegoo Centauri Carbon** (stock or OpenCentauri firmware, or OpenCentauri **COSMOS** — Klipper +
+A live panel, on-device slicer and 3D modeller for an **Elegoo Centauri Carbon** (stock or OpenCentauri firmware, or OpenCentauri **COSMOS** — Klipper +
 Moonraker, detected automatically; see [docs/COSMOS.md](docs/COSMOS.md)) on the iPad 1 (iOS 5.1.1).
 It shows the camera, the current job (thumbnail, %, layer, time left, finish time, and a rotatable **3D view of
 the part's toolpath** with the printed layers), nozzle/bed/chamber temperatures with smooth live graphs, and fans. It lets you pause/resume/stop, start prints from the printer's
 file list, set temperatures, fans, print speed and the light, and move/home axes. When a print finishes,
-fails or pauses by itself, it shows a full-screen alert and plays a sound.
+fails or pauses by itself, it shows a full-screen alert and plays a sound. It also **slices STL files on the
+iPad** with four CANVAS filament slots ([Slice](#slice)), has a Tinkercad-style **Design** page with handy test
+models ([Design](#design)), and shows the **bed mesh** in 3D ([Bed mesh](#bed-mesh)).
 
 **Pause** and **Stop** sit in the top bar above the camera. The left column is the camera with the **CANVAS
 card** beside it (the four slots of Elegoo's filament changer: colour, type, brand, which slot is feeding), a compact **job
@@ -40,13 +42,17 @@ brightened, and all are cached in `Library/Caches/PrintDeckThumbs`. See [3D tool
 
 ![PrintDeck on the iPad, connected to the real printer](docs/screenshot.png)
 
-| Printing (simulator) | Finished alert (simulator) |
+| Slice: 4 CANVAS slots and print options | Design: handy models |
 |---|---|
-| ![](docs/printing-sim.png) | ![](docs/finished-sim.png) |
+| ![](docs/slice.png) | ![](docs/design.png) |
+
+| Bed mesh | Printing (simulator) | Finished alert (simulator) |
+|---|---|---|
+| ![](docs/bed-mesh.png) | ![](docs/printing-sim.png) | ![](docs/finished-sim.png) |
 
 ## How it works
 ```
-Centauri Carbon (192.168.0.184)                            iPad: PrintDeck.app
+Centauri Carbon (192.168.0.185)                            iPad: PrintDeck.app
   UDP 3000   "M99999" discovery  ◄──── broadcast on launch ── finds the printer by itself
   TCP 3030   SDCP websocket      ◄──── Cmd 0 status every 2 s; commands
   TCP 3031   /video MJPEG        ────► camera (~8 fps, 640x360)
@@ -135,8 +141,8 @@ Slice models **on the iPad** and send them to the printer. Open it with **Slice�
   reach /Applications apps, so copy files in over SSH (`su mobile -c mkdir` the folder first).
 - **Placement**: Turn left/right (Z), Tip forward/sideways (quarter turns about X/Y), Scale −/+ and Reset.
   These are remembered, along with the model. The model turns red when it doesn't fit the 256 mm bed.
-- **Presets, laid out like ElegooSlicer / Orca.** The left column has **Printer**, **Filament** (with a colour
-  swatch) and **Process** combos holding ElegooSlicer's stock Centauri Carbon profiles (4 nozzles, 21 processes,
+- **Presets, laid out like ElegooSlicer / Orca.** The left column has **Printer**, **Filament** (the four CANVAS
+  slots, see below) and **Process** combos holding ElegooSlicer's stock Centauri Carbon profiles (4 nozzles, 21 processes,
   36 filaments) plus your own: **Save as…** stores the current printer, filament or process settings as a user
   preset (filament and process presets belong to a printer; swipe one to delete it). An edited preset reads
   "(modified)". The stock profiles are bundled by `tools/make-profiles.py` (the iPad 1 can't reach GitHub's
@@ -147,6 +153,20 @@ Slice models **on the iPad** and send them to the printer. Open it with **Slice�
   filament colours included) into `Resources/ImportedPresets.plist`; the app adds them to its user presets once
   ("From ElegooSlicer" in the lists; one you delete stays deleted). Presets for other printers (the Centauri
   Carbon 2) are skipped.
+- **Filament slots (CANVAS).** The Filament panel has four numbered rows, one per CANVAS slot, each with a colour
+  swatch and a filament preset. The highlighted number is the slot the model prints with; its **Edit** button
+  is the Filament editor. Tap another number to print with that slot (its preset, or the stock "Generic
+  <type>" for a slot that only names a material, and its colour are loaded). **From CANVAS** copies each loaded
+  slot's type, colour and name from the printer (`Cmd 324`). The start G-code loads the chosen slot as
+  ElegooSlicer does (`M6211 A1 L200 T<n> …`, then `T<n>`), and the config block lists all four slots.
+  Slots and the print slot live in `PDFilaments.m`.
+- **Flushing…** (Filament panel): ElegooSlicer's flushing-volume table, mm³ purged when the CANVAS switches
+  from one slot (row) to another (column), and a multiplier; ElegooSlicer turns each into `M6211 … L<mm>` =
+  volume × multiplier ÷ the filament's cross-section. **Calculate from colours** (or **Follow the slot
+  colours**) uses ElegooSlicer 1.5.3.5's own rule (`FlushVolCalculator::calc_flush_vol`, recovered from its
+  Linux binary): measured values for its standard colour pairs, else a brightness and hue/saturation distance
+  model, 60–800 mm³. The table starts with the values from an ElegooSlicer 4-colour file. CuraEngine 15.04
+  slices one material, so a model prints from one slot and the table is written into the file for reference.
 - **Settings**: every setting CuraEngine 15.04 uses for a single-extruder printer, under the active editor's
   tabs — Process: Quality / Strength / Speed / Support / Others; Filament (**Edit**): Filament / Cooling;
   Printer (**Edit**): Extruder. The **Advanced** switch shows the rest, as in Orca. Choices with more than two
@@ -156,8 +176,11 @@ Slice models **on the iPad** and send them to the printer. Open it with **Slice�
   with Orca's line-type legend), a vertical layer slider and the totals.
 - **Slice plate** shows progress by phase, then layers, print time, filament and grams. The result is marked
   stale when the model or the settings change.
-- **Print plate** → **Upload only** sends the G-code to the printer; **Upload and print…** also starts it
-  (asks first). Files are named `ECC_<nozzle>_<model>_<material>_<layer>_<time>.gcode` and selected in the Files card.
+- **Print plate** opens **Print options**, the choices the printer's own start screen offers: **plate type**
+  (Textured PEI or Smooth PEI), **time-lapse** and **auto bed levelling** (remembered for next time; sent in
+  `Cmd 128`), then **Print** (upload and start) or **Upload only**. On COSMOS the options are ignored. Files are
+  named `ECC_<nozzle>_<model>_<material>_<layer>_<time>.gcode`, carry a 144 × 144 thumbnail of the model in the
+  filament colour for the printer's screen, and are selected in the Files card.
 
 **Engine.** [CuraEngine 15.04.6](https://github.com/Ultimaker/CuraEngine/tree/15.04) (C++, **AGPL-3.0**)
 is vendored in `engine/CuraEngine` with a small patch (`engine/printdeck.patch`, against the 15.04.6 tag: Cura-style
@@ -176,8 +199,10 @@ Measured on the iPad 1 (A4, camera paused while slicing):
 | 40 mm sphere (20k triangles) | defaults (0.24 mm, 15 %) | 14.3 s | 166 layers, 29 min, 12.9 g |
 | 40 mm sphere | 0.30mm Standard, 15 % gyroid | 12.5 s | 133 layers, 25 min, 13.4 g |
 
-The upload was checked against the printer, which read 166 layers, 1766 s and 12.91 g from the file. No print
-of an on-device sliced file has been run yet.
+The upload was checked against the printer, which read 166 layers, 1766 s and 12.91 g from the file. Designs
+sliced on the iPad have printed on the real printer (a bolt, nut and cap: 65 layers in 10 min on 22 Nov 2026,
+and a 133-layer version on 23 Nov). Not yet checked on a real print: that the levelling and time-lapse options
+take effect, and starting from a CANVAS slot other than 1.
 
 
 ## Design
@@ -200,14 +225,18 @@ Open it from the **Design** card (or `printdeck://design[?name=<design>]`).
   bolt is about 8,500 triangles). **Edit part…** in the inspector changes a placed part's parameters (it keeps its
   place, turn and colour).
 - **Models…** (last Library tile): brings an STL or OBJ into the design as a shape — your **saved parts**
-  (`Documents/PrintDeck/Library`) or the **models on the iPad** (the Slice page's STLs) — or **downloads** one from
+  (`Documents/PrintDeck/Library`), the **handy models** (below) or the **models on the iPad** (the Slice page's
+  STLs) — or **downloads** one from
   a direct link (plain http works best; iOS 5 can't reach many HTTPS sites). Swipe to delete. **Save part…** in the
   inspector writes the selected shape (a group, a part, anything) to the Library as an STL. Imported meshes are kept
   once in `Designs/Meshes` and shared by copies; very big ones (over ~60k triangles) group slowly.
+  **Handy models**, bundled in `Resources/HandyModels`: an overhang test (fins at 20°–70°), the KSR FDM
+  all-in-one test, the Elegoo and Orca test cubes, the Voron design cube, Elegoo and Orca tolerance and stringing
+  tests, Calicat and the Stanford bunny (from ElegooSlicer's `resources/handy_models`; see [Credits](#credits)).
 - **Workplane** (centre): the 256 mm plate with a 10 mm grid. Tap a shape to select it, drag it to slide it
   (snapped to the snap grid), drag empty space to orbit, two fingers to pan, pinch to zoom, double-tap to fit.
   **Select more** (on the canvas and in the inspector) makes taps add to or remove from the selection.
-  **Slide | Move XYZ | Rotate** (top right of the canvas), as in Orca Slicer:
+  **Slide | Move XYZ | Rotate | Scale** (top right of the canvas), as in Orca Slicer:
   - **Move XYZ** puts red/green/blue arrows on the selection. Drag one to move along just that axis, Z included,
     snapped to the snap grid. While you drag:
     - A ruler runs along the axis from where you started, with 1, 5 or 10 mm ticks depending on zoom and every
@@ -225,6 +254,11 @@ Open it from the **Design** card (or `printdeck://design[?name=<design>]`).
     original axes; the inspector's TURN caption shows it too.
   - **Reset rotation** turns each selected shape back onto its own original X/Y/Z axes about its centre, keeping
     its size and mirroring.
+  - **Scale** (one shape at a time; a group scales as a whole) puts a cube handle on each of the shape's own
+    axes. Drag one to stretch that way; the size updates live. The inspector's SCALE section has X / Y / Z %
+    boxes (relative to the size when Scale was picked, 0.1–200 %, typed values are clamped) with −/+, and a
+    **Uniform** toggle that keeps the proportions (one handle or box scales all three). Fillets stay in mm,
+    shapes standing on the plate stay on it, and every change is undoable and saved.
   - Dragging the shapes themselves still slides them in every mode.
 - **Shape options** (**Options…** in the inspector, for the basic shapes):
   - **Box**: fillet or chamfer (size in mm) on all edges, all but the bottom four (prints flat), or just the
@@ -252,6 +286,9 @@ Open it from the **Design** card (or `printdeck://design[?name=<design>]`).
   T-junction-mended so the result is watertight). The BSP picks each splitting plane from a dozen candidates
   (fewest polygons cut, best balance), which keeps curved meshes from shattering: a 20 mm block minus an M6
   threaded hole comes out at about 25k triangles in 0.1 s on a PC (a few seconds on the iPad 1). Ungroup gives the members back.
+  The CSG runs on a background thread (16 MB stack) with a **progress bar** ("Combining shapes… step k of n"),
+  so the page stays responsive. A group's result is saved with the design (`Designs/Meshes/<uuid>.mesh`), so
+  opening a design doesn't redo its CSG: a design that took about 3.5 minutes to open now opens in under 9 s.
 - **Designs** saves as you go (`Documents/PrintDeck/Designs/<name>.pddesign`, a binary plist); the Designs menu
   has New, Open…, Duplicate, Rename and Delete. Undo/Redo keep the last 40 steps.
 - **Send to slicer** writes the solids' union as `<name> (design).stl` with your STLs and opens it on the Slice
@@ -277,8 +314,15 @@ pairs. PrintDeck reads a mesh from, in order (`PDMesh.m`):
   `printdeck://mesh?helper=<url-enc>`, then **Refresh**;
 - a mesh you **paste** (a `[bed_mesh]` block copied over SSH, a `BED_MESH_OUTPUT` dump, or JSON);
 - the cached last mesh, or a built-in **Demo** mesh for previewing the view.
-It also parses a Moonraker `bed_mesh` object unchanged, so a COSMOS printer works directly. See
-[meshbridge/README.md](meshbridge/README.md) to run the helper (Python 3 is at `/kip/bin/python3`).
+It also parses a Moonraker `bed_mesh` object unchanged, so a COSMOS printer works directly. The page fetches
+again on its own about 8 s after the printer finishes levelling, and its footer says where the mesh came from
+and when ("fetched 23 Nov 00:03", "pasted …", "demo mesh"), in amber when the last fetch failed.
+
+**Installing the helper:** `tools/install-meshbridge.sh [printer-ip]` (asks for the printer's root password
+once) copies it to `/kip/share/meshbridge/` and adds `/kip/etc/init.d/S90meshbridge`, which OpenCentauri's
+boot script starts at every power-on (Kipware's `rc.unslung`) and which restarts the helper if it exits. Both
+live on the persistent `/user-resource` partition, so they survive reboots and firmware updates;
+`--remove` undoes it. See [meshbridge/README.md](meshbridge/README.md).
 
 ## Using it
 - **Temperature cards** (nozzle, bed): tap for presets or a custom value. The chamber has no heater.
@@ -288,7 +332,12 @@ It also parses a Moonraker `bed_mesh` object unchanged, so a COSMOS printer work
   **Print** (asks first; disabled while busy). Move / Home also lists them (tap to print).
 - **Move / Home**: live camera; jog each axis with its own step size, home one axis or all, preheat/cool down;
   disabled while a job runs (see [Move / Home](#move--home)).
-- **••• menu**: camera on/off (saves Wi-Fi and CPU), find printer, enter an address, reconnect.
+- **••• menu**: camera on/off (saves Wi-Fi and CPU), find printer, enter an address, reconnect, Bed mesh, and
+  **Clear local cache…** (thumbnails, parsed toolpaths unless a job is running, slicer scratch files, and the
+  Design page's in-memory part and model caches).
+- **3D previews while printing**: the printer's web server answers every file download with HTTP 500 "device
+  busy" while a job is being prepared or printed, so a file that isn't cached yet shows a note saying so and
+  loads by itself once the printer allows it (PrintDeck retries every 20 s).
 
 ## SDCP commands used
 From [OpenCentauri's API notes](https://docs.opencentauri.cc/software/api) and the printer's own web UI (port 80),
@@ -297,7 +346,7 @@ checked against the printer (SDCP V3.0.0, firmware V1.4.49):
 | Cmd | Use | Data |
 |---|---|---|
 | 0 / 1 | status / attributes (attributes carry `DevicesStatus` motor state, `CameraStatus`) | — |
-| 128 | start print | `Filename`, `StartLayer` |
+| 128 | start print | `Filename`, `StartLayer`, `Calibration_switch` (1 = level first), `PrintPlatformType` (0 textured, 1 smooth), `Tlp_Switch` (1 = time-lapse) |
 | 129 / 130 / 131 | pause / stop / resume | — |
 | 258 | file list | `Url: "/local"` |
 | 259 | delete files | `FileList: ["/local/…gcode"]`, `FolderList: []` |
@@ -328,11 +377,14 @@ Pause/resume/stop/start, temperatures, fans, speed, moves/homing/preheat and the
 3D view were exercised against the simulator only, since they would interrupt, move or start the real printer. They use the same payloads as Elegoo's web UI.
 
 ## Build and install
+Needs [Theos](https://theos.dev) with the iPhoneOS 9.3 SDK (the app targets armv7, iOS 5, ARC). From the
+repo root:
 ```bash
-cd apps/PrintDeck
-make package install          # needs iproxy 2222 22 running (see DEV-NOTES.md)
-                              # (or THEOS_DEVICE_IP=ipad-wifi); also builds engine/ when its sources change
+make package install          # over USB: needs `iproxy 2222 22` running
+THEOS_DEVICE_IP=ipad-wifi make package install    # over Wi-Fi
+make package FINALPACKAGE=1   # a release .deb in packages/
 ```
+`make` also rebuilds `engine/` (CuraEngine) when its sources change.
 URL scheme (handy over SSH: `ssh ipad "su mobile -c 'uiopen printdeck://…'"`):
 `printdeck://connect?host=IP[&port=3030&video=3031]`, `printdeck://search`, `printdeck://camera?on=0|1`,
 `printdeck://event?kind=finished|paused|failed` (preview the alert), `printdeck://card?name=nozzle|bed|chamber`
@@ -348,6 +400,7 @@ pick a model, change settings such as `nozzle:0.4,quality:2,infill:30,support:1`
 3D views (1 = fit the part), and `printdeck://bench` spins the Job page's 3D view for 4 s and appends the fps to
 `/tmp/printdeck-toolpath.log` (where each toolpath load also logs its size, segments and time).
 `printdeck://drag?x0=&y0=&x1=&y1=` performs a one-finger drag on the Design canvas (screen points), used for testing the gizmos.
+`printdeck://type?label=<accessibility label>&text=<text>[&keep=1]` types into a visible text field (e.g. `X%20percent`).
 
 ## Simulator
 `sim/printdeck_sim.py` is a fake Centauri Carbon (SDCP websocket, MJPEG camera, thumbnails, synthetic G-code
