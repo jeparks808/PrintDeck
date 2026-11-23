@@ -1,5 +1,8 @@
 # What PrintDeck adds
 
+> PrintDeck is a work in progress. This page describes what each feature does, not a guarantee that it works.
+> The [README](../README.md) says which features have been checked on the real printer.
+
 The Centauri Carbon comes with two ways to watch and control it away from its touchscreen:
 
 - **The printer's own web page** (`http://<printer>/`, port 80, firmware 1.4.x). It shows the status, camera,
