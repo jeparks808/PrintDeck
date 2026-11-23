@@ -10,7 +10,13 @@ iPad** with four CANVAS filament slots ([Slice](#slice)), has a Tinkercad-style 
 models ([Design](#design)), and shows the **bed mesh** in 3D ([Bed mesh](#bed-mesh)).
 
 **What it adds over the printer's web page and ElegooSlicer**, with screenshots of each page:
-[docs/FEATURES.md](docs/FEATURES.md).
+[docs/FEATURES.md](docs/FEATURES.md). Downloads are on the [Releases](https://github.com/jeparks808/PrintDeck/releases)
+page; see [CHANGELOG.md](CHANGELOG.md) for what changed.
+
+**Contents:** [How it works](#how-it-works) · [Move / Home](#move--home) · [3D toolpath viewer](#3d-toolpath-viewer) ·
+[Slice](#slice) · [Design](#design) · [Bed mesh](#bed-mesh) · [Using it](#using-it) ·
+[SDCP commands used](#sdcp-commands-used) · [Build and install](#build-and-install) · [Simulator](#simulator) ·
+[Security note](#security-note) · [Credits](#credits)
 
 **Pause** and **Stop** sit in the top bar above the camera. The left column is the camera with the **CANVAS
 card** beside it (the four slots of Elegoo's filament changer: colour, type, brand, which slot is feeding), a compact **job
@@ -43,7 +49,7 @@ brightened, and all are cached in `Library/Caches/PrintDeckThumbs`. See [3D tool
   sizes), Home X/Y/Z and Home all, status tiles (nozzle/bed/chamber temperature and target, the three fans,
   motor drivers, Z offset, speed), Preheat PLA/PETG and Cool down, the light, and the stored files to print.
 
-![PrintDeck on the iPad, connected to the real printer](docs/screenshot.png)
+![PrintDeck on the iPad, printing on the real printer](docs/features/now.png)
 
 | Slice: 4 CANVAS slots and print options | Design: handy models |
 |---|---|

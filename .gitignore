@@ -4,15 +4,12 @@ obj/
 packages/
 *.deb
 
-# Generated Windows bundles (rebuild with windows/make-bundle.sh; also attached to releases)
-windows/*.zip
+# CuraEngine cross-build output (engine/build.sh)
+engine/build/
 
 # Python
 __pycache__/
 *.pyc
-
-# Arduino build output
-build/
 
 .DS_Store
 conversation/
