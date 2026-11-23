@@ -17,7 +17,7 @@ GET /                      -> {"default":NAME, "profiles":[{"name","nx","ny","ra
 The printer has Python 3 at `/kip/bin/python3`. Copy the script over and start it:
 
 ```bash
-scp -O meshbridge.py root@<printer-ip>:/tmp/        # password: OpenCentauri
+scp -O meshbridge.py root@<printer-ip>:/tmp/        # asks for the printer's root password
 ssh root@<printer-ip> '/kip/bin/python3 /tmp/meshbridge.py --port 7140'
 ```
 
