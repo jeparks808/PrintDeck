@@ -504,6 +504,7 @@ static const NSUInteger PDGraphLen = (NSUInteger)PD_GWINDOW + 4;  // samples kep
 	switch (self.jobState) {
 		case PDJobIdle: {
 			NSArray *cs = PDArr(self.status, @"CurrentStatus");
+			if ([cs containsObject:[NSNumber numberWithInt:5]]) return @"Leveling bed";
 			if ([cs containsObject:[NSNumber numberWithInt:3]]) return @"Calibrating";
 			if ([cs containsObject:[NSNumber numberWithInt:2]]) return @"Receiving file";
 			return @"Ready";
@@ -519,6 +520,20 @@ static const NSUInteger PDGraphLen = (NSUInteger)PD_GWINDOW + 4;  // samples kep
 		case PDJobRecovery: return @"Recovering";
 		default: return [NSString stringWithFormat:@"Status %d", c];
 	}
+}
+
+- (BOOL)machineBusy {
+	if (self.cosmos || self.isBusy) return NO;
+	for (id c in PDArr(self.status, @"CurrentStatus"))   // 0 idle, 1 printing (covered by isBusy), 2 receiving a file
+		if ([c isKindOfClass:[NSNumber class]] && [c intValue] > 2) return YES;
+	return NO;
+}
+
+// Refuses (with an alert) while the machine is busy outside a job.
+- (BOOL)refuseWhileMachineBusy {
+	if (!self.machineBusy) return NO;
+	[self postEvent:@"error" title:@"Printer is busy" detail:[NSString stringWithFormat:@"%@ — wait until it's done.", self.jobStateText]];
+	return YES;
 }
 
 - (BOOL)isBusy {
@@ -560,8 +575,18 @@ static const NSUInteger PDGraphLen = (NSUInteger)PD_GWINDOW + 4;  // samples kep
 - (void)resume { [self send:131 data:nil]; [self send:0 data:nil]; }
 - (void)stop { self.stopRequestedHere = YES; [self send:130 data:nil]; [self send:0 data:nil]; }
 
-- (void)startFile:(NSString *)path {
-	[self send:128 data:[NSDictionary dictionaryWithObjectsAndKeys:path, @"Filename", [NSNumber numberWithInt:0], @"StartLayer", nil]];
+- (void)startFile:(NSString *)path { [self startFile:path plate:0 timelapse:NO level:NO]; }
+
+- (void)startFile:(NSString *)path plate:(int)plate timelapse:(BOOL)timelapse level:(BOOL)level {
+	if ([self refuseWhileMachineBusy]) return;
+	// The full start command, as OrcaSlicer's ElegooLink sends it. A partial one ({Filename, StartLayer} only)
+	// crashed a CC1 with a CANVAS attached (firmware hung, all four CANVAS lights blinking red, no job logged).
+	// Calibration_switch 1 = level the bed before the print, PrintPlatformType 0 = PTE (textured) plate,
+	// 1 = smooth plate, Tlp_Switch 1 = time-lapse. Filename is the "/local/<name>" path the file list gives.
+	NSNumber *zero = [NSNumber numberWithInt:0];
+	[self send:128 data:[NSDictionary dictionaryWithObjectsAndKeys:path, @"Filename", zero, @"StartLayer",
+		[NSNumber numberWithInt:level ? 1 : 0], @"Calibration_switch", [NSNumber numberWithInt:plate == 1 ? 1 : 0], @"PrintPlatformType",
+		[NSNumber numberWithInt:timelapse ? 1 : 0], @"Tlp_Switch", nil]];
 	[self send:0 data:nil];
 }
 
@@ -587,9 +612,10 @@ static const NSUInteger PDGraphLen = (NSUInteger)PD_GWINDOW + 4;  // samples kep
 	[self edit:[NSDictionary dictionaryWithObject:ls forKey:@"LightStatus"]];
 }
 
-- (void)home:(NSString *)axes { [self send:402 data:[NSDictionary dictionaryWithObject:axes forKey:@"Axis"]]; }
+- (void)home:(NSString *)axes { if ([self refuseWhileMachineBusy]) return; [self send:402 data:[NSDictionary dictionaryWithObject:axes forKey:@"Axis"]]; }
 
 - (void)jog:(NSString *)axis by:(double)mm {
+	if ([self refuseWhileMachineBusy]) return;
 	[self send:401 data:[NSDictionary dictionaryWithObjectsAndKeys:axis, @"Axis", [NSNumber numberWithDouble:mm], @"Step", nil]];
 }
 

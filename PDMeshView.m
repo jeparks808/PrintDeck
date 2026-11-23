@@ -292,8 +292,13 @@ static NSString *PDTurns(double turns) {
 	self.canvas.mesh = m;
 	[self.canvas setNeedsDisplay];
 	PDMeshSource *src = [PDMeshSource shared];
-	self.profileLabel.text = m ? [NSString stringWithFormat:@"profile: %@   %lux%lu   %@", m.profileName,
-		(unsigned long)m.nx, (unsigned long)m.ny, src.fetching ? @"refreshing…" : @""] : (src.lastError ?: @"");
+	// Always say where the mesh is from, and if the last refresh failed say so: an old mesh must not pass for new.
+	NSString *state = src.fetching ? @"refreshing…" : src.lastError ? [@"couldn't refresh: " stringByAppendingString:src.lastError]
+		: src.lastFetchUnchanged ? @"unchanged since last fetch" : @"";
+	self.profileLabel.text = m ? [NSString stringWithFormat:@"profile: %@   %lux%lu   ·  %@%@%@", m.profileName, (unsigned long)m.nx, (unsigned long)m.ny,
+		src.origin ?: @"cached", [state length] ? @"  ·  " : @"", state] : (src.lastError ?: @"");
+	self.profileLabel.textColor = src.lastError && m ? PD_AMBER : PD_FAINT;
+	self.profileLabel.adjustsFontSizeToFitWidth = YES;
 	if (!m) { self.devLabel.text = @"–"; return; }
 	self.devLabel.text = [NSString stringWithFormat:@"range %.3f mm", m.range];
 	double maxAbs = MAX(fabs(m.max - m.mean), fabs(m.mean - m.min));

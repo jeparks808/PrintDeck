@@ -133,7 +133,7 @@ NSString *const PDFilesSelectionNotification = @"PDFilesSelectionNotification";
 
 - (void)refresh {
 	PDPrinter *p = [PDPrinter shared];
-	BOOL can = p.connected && !p.isBusy && [self fileNamed:self.selectedPath] != nil;
+	BOOL can = p.connected && !p.isBusy && !p.machineBusy && [self fileNamed:self.selectedPath] != nil;
 	self.printButton.enabled = can;
 	self.printButton.alpha = can ? 1 : 0.4;
 	self.inspectButton.hidden = !self.selectedPath;

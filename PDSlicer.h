@@ -126,4 +126,6 @@ typedef enum { PDUploadIdle, PDUploadRunning, PDUploadDone, PDUploadFailed } PDU
 @property (nonatomic, readonly) double uploadProgress;
 @property (nonatomic, readonly, copy) NSString *uploadError, *uploadedName;
 - (void)uploadAndPrint:(BOOL)print;
+// Uploads, then starts the print with these options (keys plate (0 textured / 1 smooth), timelapse, level: NSNumbers).
+- (void)uploadAndPrintWithOptions:(NSDictionary *)options;
 @end

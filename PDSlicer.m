@@ -2,6 +2,7 @@
 #import "PDPrinter.h"
 #import "PDToolpath.h"
 #import "PDFilesCard.h"
+#import "PDFilaments.h"
 #import "PDUtil.h"
 #import <CommonCrypto/CommonDigest.h>
 #include <spawn.h>
@@ -23,6 +24,109 @@ static NSNumber *PDN(double v) { return [NSNumber numberWithDouble:v]; }
 // The iPhoneOS9.3 SDK stubs don't export some libc string functions for armv7 (iOS 5 has them; the linker
 // can't see them), so the few compares here are done by hand.
 static int PDHasPrefix(const char *s, const char *pre) { while (*pre) if (*s++ != *pre++) return 0; return 1; }
+
+// A shaded picture of the placed model, for the preview the printer's screen and file list show. Plain C with a
+// depth buffer (slicing runs off the main thread, so no OpenGL), drawn at 2× and scaled down for smooth edges.
+// View: orthographic, from the front-right and above, like the slicers' plate thumbnails. Background transparent.
+static NSData *PDRenderThumbnail(PDModel *model, int size, NSString *hex) {
+	NSUInteger n = model.triangleCount;
+	const float *t = model.triangles;
+	if (!n || !t || size < 8) return nil;
+	unsigned rgb = 0x3C8CE6;
+	if ([hex length] >= 7) sscanf([hex UTF8String] + 1, "%6x", &rgb);
+	float cr = ((rgb >> 16) & 255) / 255.f, cg = ((rgb >> 8) & 255) / 255.f, cb = (rgb & 255) / 255.f;
+	float lum = 0.3f * cr + 0.59f * cg + 0.11f * cb;
+	if (lum < 0.3f) { float k = 0.3f - lum; cr += k; cg += k; cb += k; }   // black/dark filament: still show the shape
+	GLKMatrix3 m = [model matrix];
+	const float az = 35 * (float)M_PI / 180, el = 30 * (float)M_PI / 180;
+	float ca = cosf(az), sa = sinf(az), ce = cosf(el), se = sinf(el);
+	// view space: x right, y up, z towards the viewer
+	#define PDVIEW(p, o) do { float x1 = (p).x * ca + (p).y * sa, y1 = -(p).x * sa + (p).y * ca; \
+		(o)[0] = x1; (o)[1] = (p).z * ce + y1 * se; (o)[2] = -y1 * ce + (p).z * se; } while (0)
+	float *v = malloc(n * 9 * sizeof(float));
+	if (!v) return nil;
+	float lo[2] = {INFINITY, INFINITY}, hi[2] = {-INFINITY, -INFINITY};
+	for (NSUInteger i = 0; i < n * 3; i++) {
+		GLKVector3 p = GLKMatrix3MultiplyVector3(m, GLKVector3Make(t[i * 3], t[i * 3 + 1], t[i * 3 + 2]));
+		PDVIEW(p, v + i * 3);
+		for (int k = 0; k < 2; k++) { lo[k] = MIN(lo[k], v[i * 3 + k]); hi[k] = MAX(hi[k], v[i * 3 + k]); }
+	}
+	#undef PDVIEW
+	int W = size * 2;
+	float span = MAX(hi[0] - lo[0], hi[1] - lo[1]);
+	if (!(span > 0)) { free(v); return nil; }
+	float scale = W * 0.86f / span, ox = W / 2.f - (lo[0] + hi[0]) / 2 * scale, oy = W / 2.f + (lo[1] + hi[1]) / 2 * scale;
+	float *zb = malloc(sizeof(float) * W * W);
+	uint8_t *px = calloc((size_t)W * W, 4);
+	if (!zb || !px) { free(v); free(zb); free(px); return nil; }
+	for (int i = 0; i < W * W; i++) zb[i] = -INFINITY;
+	const float L[3] = {-0.35f, 0.55f, 0.76f};   // light from the upper left, towards the viewer
+	for (NSUInteger i = 0; i < n; i++) {
+		float *a = v + i * 9, *b = a + 3, *c = a + 6;
+		float ux = b[0] - a[0], uy = b[1] - a[1], uz = b[2] - a[2], wx = c[0] - a[0], wy = c[1] - a[1], wz = c[2] - a[2];
+		float nx = uy * wz - uz * wy, ny = uz * wx - ux * wz, nz = ux * wy - uy * wx, nl = sqrtf(nx * nx + ny * ny + nz * nz);
+		if (!(nl > 0)) continue;
+		if (nz < 0) { nx = -nx; ny = -ny; nz = -nz; }   // STLs aren't always wound consistently
+		float d = (nx * L[0] + ny * L[1] + nz * L[2]) / nl;
+		float shade = 0.38f + 0.62f * MAX(0.f, d);
+		float sx[3] = {ox + a[0] * scale, ox + b[0] * scale, ox + c[0] * scale};
+		float sy[3] = {oy - a[1] * scale, oy - b[1] * scale, oy - c[1] * scale};
+		float sz[3] = {a[2], b[2], c[2]};
+		float area = (sx[1] - sx[0]) * (sy[2] - sy[0]) - (sx[2] - sx[0]) * (sy[1] - sy[0]);
+		if (fabsf(area) < 1e-6f) continue;
+		int x0 = MAX(0, (int)floorf(MIN(sx[0], MIN(sx[1], sx[2])))), x1 = MIN(W - 1, (int)ceilf(MAX(sx[0], MAX(sx[1], sx[2]))));
+		int y0 = MAX(0, (int)floorf(MIN(sy[0], MIN(sy[1], sy[2])))), y1 = MIN(W - 1, (int)ceilf(MAX(sy[0], MAX(sy[1], sy[2]))));
+		uint8_t R = (uint8_t)MIN(255.f, cr * shade * 255), G = (uint8_t)MIN(255.f, cg * shade * 255), B = (uint8_t)MIN(255.f, cb * shade * 255);
+		for (int y = y0; y <= y1; y++) for (int x = x0; x <= x1; x++) {
+			float qx = x + 0.5f, qy = y + 0.5f;
+			float w0 = ((sx[1] - qx) * (sy[2] - qy) - (sx[2] - qx) * (sy[1] - qy)) / area;
+			float w1 = ((sx[2] - qx) * (sy[0] - qy) - (sx[0] - qx) * (sy[2] - qy)) / area;
+			float w2 = 1 - w0 - w1;
+			if (w0 < 0 || w1 < 0 || w2 < 0) continue;
+			float z = w0 * sz[0] + w1 * sz[1] + w2 * sz[2];
+			int k = y * W + x;
+			if (z <= zb[k]) continue;
+			zb[k] = z;
+			px[k * 4] = R; px[k * 4 + 1] = G; px[k * 4 + 2] = B; px[k * 4 + 3] = 255;
+		}
+	}
+	free(v); free(zb);
+	CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+	CGContextRef big = CGBitmapContextCreate(px, W, W, 8, W * 4, cs, kCGImageAlphaPremultipliedLast);
+	CGImageRef bigImg = big ? CGBitmapContextCreateImage(big) : NULL;
+	CGContextRef small = CGBitmapContextCreate(NULL, size, size, 8, size * 4, cs, kCGImageAlphaPremultipliedLast);
+	NSData *png = nil;
+	if (bigImg && small) {
+		CGContextSetInterpolationQuality(small, kCGInterpolationHigh);
+		CGContextDrawImage(small, CGRectMake(0, 0, size, size), bigImg);
+		CGImageRef img = CGBitmapContextCreateImage(small);
+		if (img) { png = UIImagePNGRepresentation([UIImage imageWithCGImage:img]); CGImageRelease(img); }
+	}
+	if (bigImg) CGImageRelease(bigImg);
+	if (big) CGContextRelease(big);
+	if (small) CGContextRelease(small);
+	CGColorSpaceRelease(cs);
+	free(px);
+	return png;
+}
+
+// "; thumbnail begin WxH <len>" + base64 in 78-character "; " lines + "; thumbnail end", as Orca/ElegooSlicer write it.
+static void PDAppendThumbnail(NSMutableString *out, NSData *png, int size) {
+	if (![png length]) return;
+	static const char *a = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+	const uint8_t *p = [png bytes];
+	NSUInteger len = [png length];
+	NSMutableString *b64 = [NSMutableString stringWithCapacity:(len + 2) / 3 * 4];
+	for (NSUInteger i = 0; i < len; i += 3) {
+		uint32_t q = (uint32_t)p[i] << 16 | (i + 1 < len ? (uint32_t)p[i + 1] << 8 : 0) | (i + 2 < len ? p[i + 2] : 0);
+		char c[5] = {a[q >> 18 & 63], a[q >> 12 & 63], i + 1 < len ? a[q >> 6 & 63] : '=', i + 2 < len ? a[q & 63] : '=', 0};
+		[b64 appendString:[NSString stringWithUTF8String:c]];
+	}
+	[out appendFormat:@"; thumbnail begin %dx%d %lu\n", size, size, (unsigned long)[b64 length]];
+	for (NSUInteger i = 0; i < [b64 length]; i += 78)
+		[out appendFormat:@"; %@\n", [b64 substringWithRange:NSMakeRange(i, MIN((NSUInteger)78, [b64 length] - i))]];
+	[out appendString:@"; thumbnail end\n"];
+}
 static int PDEqual(const char *a, const char *b) { while (*a && *a == *b) { a++; b++; } return *a == *b; }
 
 #pragma mark - Settings
@@ -817,6 +921,7 @@ static void pdt_box(PDTriBuf *b, float x0, float y0, float z0, float x1, float y
 @property (nonatomic) int upPort;
 @property (nonatomic) long long upOffset, upTotal, upChunk;
 @property (nonatomic) BOOL upPrint, upCosmos;
+@property (nonatomic, copy) NSDictionary *upOptions;   // print options for the start command
 @end
 
 @implementation PDSlicer
@@ -847,7 +952,7 @@ static void pdt_box(PDTriBuf *b, float x0, float y0, float z0, float x1, float y
 	NSDictionary *s = [PDSliceSettings current];
 	NSMutableArray *parts = [NSMutableArray array];
 	for (NSString *k in [[s allKeys] sortedArrayUsingSelector:@selector(compare:)]) [parts addObject:[NSString stringWithFormat:@"%@=%@", k, [s objectForKey:k]]];
-	return [NSString stringWithFormat:@"%@#%@", [self.model signature] ?: @"", [parts componentsJoinedByString:@","]];
+	return [NSString stringWithFormat:@"%@#%@#%@", [self.model signature] ?: @"", [parts componentsJoinedByString:@","], [PDFilamentSlots signature]];
 }
 
 #pragma mark Config
@@ -960,7 +1065,10 @@ static int PDum(double mm) { return (int)lround(mm * 1000.0); }
 	if (cosmos && pr.caseLedName) [start appendFormat:@"SET_LED LED=%@ WHITE=1\n", pr.caseLedName];
 	if (bed > 0) [start appendFormat:@"M190 S%d\n", bed];
 	if (cosmos) [start appendFormat:@"M109 S%d\n", nozzle];
-	else [start appendFormat:@"M109 S%d\nM6211 A1 L200 T0 Q%d R%d S%d\nT0\n", nozzle, nozzle, nozzle, nozzle];
+	else {   // load the model's CANVAS slot (ElegooSlicer: M6211 A1 L200 T[initial extruder] …, then T<n>)
+		int tool = [PDFilamentSlots activeSlot];
+		[start appendFormat:@"M109 S%d\nM6211 A1 L200 T%d Q%d R%d S%d\nT%d\n", nozzle, tool, nozzle, nozzle, nozzle, tool];
+	}
 	double chamber = V(@"chamberFanPct");
 	if (chamber < 0 && [material isEqualToString:@"PLA"]) [start appendString:bed > 50 ? fanCmd(3, 100, @"chamber fan, keeps PLA from jamming") : bed > 45 ? fanCmd(3, 180 / 2.55, @"chamber fan") : @""];
 	else if (chamber > 0) [start appendString:fanCmd(3, chamber, @"chamber fan")];
@@ -1038,7 +1146,7 @@ static NSString *PDSafeName(NSString *n) {
 			name = [NSString stringWithFormat:@"ECC_%g_%@_%@_%.2f_%@.gcode", [[settings objectForKey:@"nozzle"] doubleValue], PDSafeName(model.name), material,
 				[[settings objectForKey:@"layerHeight"] doubleValue], PDTimeTag(printSecs)];
 			final = [dir stringByAppendingPathComponent:@"result.gcode"];
-			err = [self wrap:raw into:final settings:settings seconds:printSecs filament:filamentMM grams:grams layers:&layers];
+			err = [self wrap:raw into:final model:model settings:settings seconds:printSecs filament:filamentMM grams:grams layers:&layers];
 			if (!err) tp = [PDToolpath toolpathFromFile:final path:[@"/local/" stringByAppendingString:name] allTypes:YES];
 		}
 		[[NSFileManager defaultManager] removeItemAtPath:raw error:NULL];
@@ -1115,9 +1223,28 @@ static NSString *PDSafeName(NSString *n) {
 	return nil;
 }
 
+// The four CANVAS slots and the flushing volumes between them, in ElegooSlicer's config keys (lists in slot order).
+// The model prints with one slot (T<n> in the start G-code); the rest describe what's loaded, as ElegooSlicer writes.
+static NSString *PDSlotConfig(void) {
+	NSMutableArray *ids = [NSMutableArray array], *types = [NSMutableArray array], *cols = [NSMutableArray array], *temps = [NSMutableArray array], *maps = [NSMutableArray array];
+	for (NSDictionary *sl in [PDFilamentSlots slots]) {
+		[ids addObject:[NSString stringWithFormat:@"\"%@\"", [[sl objectForKey:@"title"] stringByReplacingOccurrencesOfString:@"\"" withString:@"'"] ?: @""]];
+		[types addObject:[sl objectForKey:@"type"] ?: @"PLA"];
+		[cols addObject:[sl objectForKey:@"color"] ?: @"#808080"];
+		[temps addObject:[NSString stringWithFormat:@"%d", [[sl objectForKey:@"nozzleTemp"] intValue]]];
+		[maps addObject:@"1"];
+	}
+	NSMutableArray *m = [NSMutableArray array];
+	for (NSNumber *v in [PDFilamentSlots flushMatrix]) [m addObject:[NSString stringWithFormat:@"%g", [v doubleValue]]];
+	return [NSString stringWithFormat:@"; filament_slots_colour = %@\n; filament_slots_settings_id = %@\n; filament_slots_type = %@\n; filament_slots_nozzle_temperature = %@\n"
+		"; initial_extruder = %d\n; flush_volumes_matrix = %@\n; flush_multiplier = %g\n; filament_map = %@\n",
+		[cols componentsJoinedByString:@";"], [ids componentsJoinedByString:@";"], [types componentsJoinedByString:@";"], [temps componentsJoinedByString:@","],
+		[PDFilamentSlots activeSlot], [m componentsJoinedByString:@","], [PDFilamentSlots flushMultiplier], [maps componentsJoinedByString:@","]];
+}
+
 // ElegooSlicer-style metadata around CuraEngine's G-code. The Centauri's firmware only reads layers / time /
 // weight (Cmd 258/260) when the "; generated by" line mentions ElegooSlicer, hence the "compatible" wording.
-- (NSString *)wrap:(NSString *)raw into:(NSString *)final settings:(NSDictionary *)s seconds:(double)secs
+- (NSString *)wrap:(NSString *)raw into:(NSString *)final model:(PDModel *)model settings:(NSDictionary *)s seconds:(double)secs
 	filament:(double)mm grams:(double)g layers:(int *)layersOut {
 	FILE *in = fopen([raw fileSystemRepresentation], "rb");
 	if (!in) return @"The slicer's output is missing.";
@@ -1138,9 +1265,18 @@ static NSString *PDSafeName(NSString *n) {
 	NSString *hms = secs >= 3600 ? [NSString stringWithFormat:@"%ldh %ldm %lds", lround(secs) / 3600, (lround(secs) % 3600) / 60, lround(secs) % 60]
 		: [NSString stringWithFormat:@"%ldm %lds", lround(secs) / 60, lround(secs) % 60];
 	NSString *head = [NSString stringWithFormat:@"; HEADER_BLOCK_START\n; generated by PrintDeck %@ (ElegooSlicer compatible)\n"
-		"; total layer number: %d\n; filament_density: %.2f\n; filament_diameter: %g\n; max_z_height: %.2f\n; HEADER_BLOCK_END\n\n; EXECUTABLE_BLOCK_START\n",
+		"; total layer number: %d\n; filament_density: %.2f\n; filament_diameter: %g\n; max_z_height: %.2f\n; HEADER_BLOCK_END\n\n",
 		[PDSlicer engineVersion], layers, g > 0 && mm > 0 ? g / (mm * M_PI * fr * fr / 1000.0) : 1.24, 2 * fr, maxZ];
 	fputs([head UTF8String], out);
+	// The preview the printer's screen shows: one 144×144 PNG in its own block before the G-code, as ElegooSlicer writes it.
+	NSData *png = PDRenderThumbnail(model, 144, [s objectForKey:@"filamentColor"]);
+	if (png) {
+		NSMutableString *thumb = [NSMutableString stringWithString:@"; THUMBNAIL_BLOCK_START\n\n;\n"];
+		PDAppendThumbnail(thumb, png, 144);
+		[thumb appendString:@"; THUMBNAIL_BLOCK_END\n\n"];
+		fputs([thumb UTF8String], out);
+	}
+	fputs("; EXECUTABLE_BLOCK_START\n", out);
 	char buf[65536];
 	size_t n;
 	while ((n = fread(buf, 1, sizeof buf, in)) > 0) fwrite(buf, 1, n, out);
@@ -1149,12 +1285,12 @@ static NSString *PDSafeName(NSString *n) {
 		"; filament used [g] = %.2f\n; total filament used [g] = %.2f\n; total layers count = %d\n; estimated printing time (normal mode) = %@\n\n"
 		"; CONFIG_BLOCK_START\n; layer_height = %.2f\n; nozzle_diameter = %g\n; filament_diameter = %g\n; printer_model = Elegoo Centauri Carbon\n; filament_type = %@\n"
 		"; filament_colour = %@\n; filament_settings_id = \"%@\"\n; print_settings_id = \"%@\"\n"
-		"; sparse_infill_density = %.0f%%\n; wall_loops = %.0f\n; nozzle_temperature = %.0f\n; hot_plate_temp = %.0f\n; CONFIG_BLOCK_END\n",
+		"; sparse_infill_density = %.0f%%\n; wall_loops = %.0f\n; nozzle_temperature = %.0f\n; hot_plate_temp = %.0f\n%@; CONFIG_BLOCK_END\n",
 		mm, mm * M_PI * fr * fr / 1000.0, g, g, layers, hms,
 		[[s objectForKey:@"layerHeight"] doubleValue], [[s objectForKey:@"nozzle"] doubleValue], 2 * fr, material,
 		[s objectForKey:@"filamentColor"] ?: @"#3C8CE6", [[s objectForKey:@"filamentName"] length] ? [s objectForKey:@"filamentName"] : material,
 		[PDSliceProfiles selectedTitleForEditor:@"process"] ?: @"PrintDeck", [[s objectForKey:@"infill"] doubleValue], [[s objectForKey:@"walls"] doubleValue],
-		[[s objectForKey:@"nozzleTemp"] doubleValue], [[s objectForKey:@"bedTemp"] doubleValue]];
+		[[s objectForKey:@"nozzleTemp"] doubleValue], [[s objectForKey:@"bedTemp"] doubleValue], PDSlotConfig()];
 	fputs([foot UTF8String], out);
 	if (fclose(out) != 0) return @"Couldn't write the G-code (disk full?).";
 	*layersOut = layers;
@@ -1193,7 +1329,14 @@ static NSString *PDFileMD5(NSString *file) {
 
 // ElegooSlicer's upload: POST http://<printer>:3030/uploadFile/upload, multipart (Check, S-File-MD5, Offset,
 // Uuid, TotalSize, File), in chunks of at most 1 MiB; each answers {"code":"000000"} on success.
+- (void)uploadAndPrintWithOptions:(NSDictionary *)options {
+	if (self.uploadState == PDUploadRunning) return;
+	self.upOptions = options;
+	[self uploadAndPrint:YES];
+}
+
 - (void)uploadAndPrint:(BOOL)print {
+	if (!print) self.upOptions = nil;
 	PDPrinter *p = [PDPrinter shared];
 	if (self.uploadState == PDUploadRunning || self.state != PDSliceDone || !self.resultFile) return;
 	if (!p.connected) { self.uploadState = PDUploadFailed; self.uploadError = @"Not connected to the printer."; [self post]; return; }
@@ -1301,7 +1444,8 @@ static NSString *PDFileMD5(NSString *file) {
 	if (self.upPrint) {
 		// Give the printer a moment to index the new file before starting it.
 		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-			if (!p.isBusy) [p startFile:path];
+			NSDictionary *o = self.upOptions;
+			if (!p.isBusy) [p startFile:path plate:[[o objectForKey:@"plate"] intValue] timelapse:[[o objectForKey:@"timelapse"] boolValue] level:[[o objectForKey:@"level"] boolValue]];
 		});
 	}
 	[self post];

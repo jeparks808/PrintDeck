@@ -1,10 +1,12 @@
 #import "PDMesh.h"
 #import "PDUtil.h"
+#import "PDPrinter.h"
 #include <math.h>
 
 NSString *const PDMeshDidUpdateNotification = @"PDMeshDidUpdateNotification";
 static NSString *const PDMeshCacheKey = @"PDMeshCache";
 static NSString *const PDMeshHelperKey = @"PDMeshHelperURL";
+static NSString *const PDMeshOriginKey = @"PDMeshOrigin";
 
 @interface PDMesh () {
 	double *_z;  // nx*ny, row-major: index(gx,gy) = gy*nx + gx
@@ -244,6 +246,9 @@ static BOOL PDPairValue(NSString *text, NSString *key, double *a, double *b) {
 @property (nonatomic, readwrite, strong) PDMesh *mesh;
 @property (nonatomic, readwrite, copy) NSString *lastError;
 @property (nonatomic, readwrite) BOOL fetching;
+@property (nonatomic, readwrite, copy) NSString *origin;
+@property (nonatomic, readwrite) BOOL lastFetchUnchanged;
+@property (nonatomic) BOOL wasLeveling;
 @property (nonatomic, strong) NSURLConnection *conn;
 @property (nonatomic, strong) NSMutableData *buf;
 @end
@@ -263,8 +268,31 @@ static BOOL PDPairValue(NSString *text, NSString *key, double *a, double *b) {
 		_helperURL = [[d stringForKey:PDMeshHelperKey] copy];
 		NSDictionary *cached = [d objectForKey:PDMeshCacheKey];
 		if ([cached isKindOfClass:[NSDictionary class]]) _mesh = [PDMesh meshFromJSON:cached];
+		_origin = [[d stringForKey:PDMeshOriginKey] copy];
+		[[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(printerChanged) name:PDPrinterDidUpdateNotification object:nil];
 	}
 	return self;
+}
+
+// A bed levelling just finished: the printer may have saved a new mesh, so ask the helper again (after a pause
+// for the firmware to write it out).
+- (void)printerChanged {
+	NSString *state = [PDPrinter shared].jobStateText;
+	BOOL leveling = [state isEqualToString:@"Leveling bed"] || [state isEqualToString:@"Calibrating"];
+	if (self.wasLeveling && !leveling && [self.helperURL length])
+		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 8 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{ [self fetch]; });
+	self.wasLeveling = leveling;
+}
+
+- (void)setOriginText:(NSString *)o {
+	self.origin = o;
+	[[NSUserDefaults standardUserDefaults] setObject:o forKey:PDMeshOriginKey];
+}
+
+static NSString *PDMeshStamp(void) {
+	NSDateFormatter *f = [[NSDateFormatter alloc] init];
+	f.dateFormat = @"d MMM HH:mm";
+	return [f stringFromDate:[NSDate date]];
 }
 
 - (void)setHelperURL:(NSString *)u {
@@ -275,6 +303,7 @@ static BOOL PDPairValue(NSString *text, NSString *key, double *a, double *b) {
 - (void)applyMesh:(PDMesh *)mesh error:(NSString *)err {
 	self.fetching = NO;
 	if (mesh) {
+		self.lastFetchUnchanged = self.mesh && [[self.mesh toJSON] isEqualToDictionary:[mesh toJSON]];
 		self.mesh = mesh;
 		self.lastError = nil;
 		[[NSUserDefaults standardUserDefaults] setObject:[mesh toJSON] forKey:PDMeshCacheKey];
@@ -291,6 +320,7 @@ static BOOL PDPairValue(NSString *text, NSString *key, double *a, double *b) {
 	self.buf = [NSMutableData data];
 	NSURLRequest *req = [NSURLRequest requestWithURL:[NSURL URLWithString:self.helperURL] cachePolicy:NSURLRequestReloadIgnoringLocalCacheData timeoutInterval:8];
 	self.conn = [[NSURLConnection alloc] initWithRequest:req delegate:self];
+	[[NSNotificationCenter defaultCenter] postNotificationName:PDMeshDidUpdateNotification object:self];   // shows "refreshing…"
 }
 
 - (void)loadDemo {
@@ -311,7 +341,9 @@ static BOOL PDPairValue(NSString *text, NSString *key, double *a, double *b) {
 		[rows addObject:row];
 	}
 	PDMesh *m = [[PDMesh alloc] initWithRows:rows minX:20 minY:20 maxX:200 maxY:200 profile:@"demo"];
+	[self setOriginText:@"demo mesh"];
 	[self applyMesh:m error:nil];
+	self.lastFetchUnchanged = NO;
 }
 
 - (BOOL)setPastedText:(NSString *)text error:(NSString **)err {
@@ -323,7 +355,9 @@ static BOOL PDPairValue(NSString *text, NSString *key, double *a, double *b) {
 		m = [self meshFromAnyJSON:j];
 	}
 	if (!m) { if (err) *err = @"Couldn't read that as a Klipper bed_mesh or JSON."; return NO; }
+	[self setOriginText:[@"pasted " stringByAppendingString:PDMeshStamp()]];
 	[self applyMesh:m error:nil];
+	self.lastFetchUnchanged = NO;
 	return YES;
 }
 
@@ -341,13 +375,15 @@ static BOOL PDPairValue(NSString *text, NSString *key, double *a, double *b) {
 
 - (void)connection:(NSURLConnection *)c didFailWithError:(NSError *)error {
 	self.conn = nil;
-	[self applyMesh:nil error:[NSString stringWithFormat:@"Can't reach the mesh helper (%@).", [error localizedDescription]]];
+	[self applyMesh:nil error:[NSString stringWithFormat:@"Can't reach the mesh helper at %@ (%@). Is meshbridge running on the printer?",
+		[[NSURL URLWithString:self.helperURL] host] ?: self.helperURL, [error localizedDescription]]];
 }
 
 - (void)connectionDidFinishLoading:(NSURLConnection *)c {
 	self.conn = nil;
 	id j = self.buf ? [NSJSONSerialization JSONObjectWithData:self.buf options:0 error:NULL] : nil;
 	PDMesh *m = [self meshFromAnyJSON:j];
+	if (m) [self setOriginText:[@"fetched " stringByAppendingString:PDMeshStamp()]];
 	[self applyMesh:m error:m ? nil : @"The helper's reply wasn't a mesh."];
 }
 

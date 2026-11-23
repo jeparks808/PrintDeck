@@ -666,7 +666,7 @@ static NSString *PDTempText(NSNumber *cur, NSNumber *target) {
 - (void)refreshMachine {
 	PDPrinter *p = [PDPrinter shared];
 	NSDictionary *st = p.status;
-	BOOL idle = p.connected && !p.isBusy;
+	BOOL idle = p.connected && !p.isBusy && !p.machineBusy;
 	[self refreshCamera];
 	for (UIButton *b in self.jogBtns) { b.enabled = idle; b.alpha = idle ? 1 : 0.4; }
 	for (UIButton *b in self.homeBtns) { b.enabled = idle; b.alpha = idle ? 1 : 0.4; }
@@ -777,7 +777,7 @@ static NSString *PDTempText(NSNumber *cur, NSNumber *target) {
 }
 - (void)quickAction:(UIButton *)b {
 	PDPrinter *p = [PDPrinter shared];
-	if (p.isBusy) return;
+	if (p.isBusy || [p refuseWhileMachineBusy]) return;
 	switch (b.tag) {
 		case 0: [p setNozzleTarget:210]; [p setBedTarget:60]; break;   // PLA
 		case 1: [p setNozzleTarget:240]; [p setBedTarget:70]; break;   // PETG
@@ -921,10 +921,10 @@ static NSString *PDSlicerTime(NSString *path) {
 	}
 	self.fileInfo.text = [lines componentsJoinedByString:@"\n"];
 	[self loadThumb:PDStr(det, @"Thumbnail")];
-	BOOL can = p.connected && !p.isBusy && f != nil;
+	BOOL can = p.connected && !p.isBusy && !p.machineBusy && f != nil;
 	self.printFileBtn.enabled = can;
 	self.printFileBtn.alpha = can ? 1 : 0.4;
-	[self.printFileBtn setTitle:p.isBusy ? @"Printer busy" : @"Print this file" forState:UIControlStateNormal];
+	[self.printFileBtn setTitle:(p.isBusy || p.machineBusy) ? @"Printer busy" : @"Print this file" forState:UIControlStateNormal];
 	[self selectRowForPath:path];
 	[self refreshViewer];
 	[self setNeedsLayout];

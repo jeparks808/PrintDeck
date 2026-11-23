@@ -472,6 +472,9 @@ static NSArray *PDTPSlots(void) { return [NSArray arrayWithObjects:@"job", @"fil
 
 - (void)post { [[NSNotificationCenter defaultCenter] postNotificationName:PDToolpathNotification object:self]; }
 
+static NSString *const PDTPBusy = @"The printer won't send files while it's printing or getting a print ready (it answers “device busy”). "
+	@"The preview loads as soon as it will; PrintDeck keeps asking. (Files opened in PrintDeck's file list before printing show right away.)";
+
 static NSString *PDTPCacheDir(void) {
 	NSString *d = [[NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES) objectAtIndex:0] stringByAppendingPathComponent:@"toolpaths"];
 	[[NSFileManager defaultManager] createDirectoryAtPath:d withIntermediateDirectories:YES attributes:nil error:NULL];
@@ -559,6 +562,10 @@ static PDToolpath *PDTPCached(NSString *path, long long size, NSString *preferSl
 }
 
 - (void)startLoad:(NSString *)path url:(NSURL *)url size:(long long)size useCache:(BOOL)useCache {
+	[self startLoad:path url:url size:size useCache:useCache busyTries:0];
+}
+
+- (void)startLoad:(NSString *)path url:(NSURL *)url size:(long long)size useCache:(BOOL)useCache busyTries:(int)tries {
 	[self stopWaiting];
 	int32_t gen = OSAtomicIncrement32Barrier(&_gen);
 	self.requestedURL = url; self.requestedSize = size;
@@ -596,6 +603,12 @@ static PDToolpath *PDTPCached(NSString *path, long long size, NSString *preferSl
 			else if (t) me.error = @"No printable moves found in this file.";
 			else me.error = err ?: @"Couldn't load the file.";
 			[me post];
+			// The printer was busy: ask again every 20 s (for up to a day's printing), unless something else has been
+			// asked for meanwhile.
+			if (err == PDTPBusy && tries < 4320) dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 20 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+				if (me->_gen == gen && !me.loadingPath && [me.requestedPath isEqualToString:path])
+					[me startLoad:path url:url size:size useCache:NO busyTries:tries + 1];
+			});
 		});
 	});
 }
@@ -635,6 +648,12 @@ static PDToolpath *PDTPCached(NSString *path, long long size, NSString *preferSl
 				NSString *len = (__bridge_transfer NSString *)CFHTTPMessageCopyHeaderFieldValue(resp, CFSTR("Content-Length"));
 				CFRelease(resp);
 				if (code == 404) { ok = NO; *err = @"The file is no longer on the printer."; break; }
+				// The Centauri's web server sends no files while a job is underway (levelling, heating, printing):
+				// HTTP 500 with the body "device busy". Not a failure: startLoad keeps trying.
+				if (code == 500 || code == 503) {
+					NSString *body = [[NSString alloc] initWithBytes:buf length:(NSUInteger)MIN(n, 64) encoding:NSUTF8StringEncoding];
+					if (body && [[body lowercaseString] rangeOfString:@"busy"].location != NSNotFound) { ok = NO; *err = PDTPBusy; break; }
+				}
 				if (code != 200) { ok = NO; *err = [NSString stringWithFormat:@"The printer answered HTTP %d.", (int)code]; break; }
 				if ([len longLongValue] > 0) total = [len longLongValue];
 			}

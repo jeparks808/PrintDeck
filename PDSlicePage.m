@@ -1,5 +1,6 @@
 #import "PDSlicePage.h"
 #import "PDSlicer.h"
+#import "PDFilaments.h"
 #import "PDModelView.h"
 #import "PDToolpath.h"
 #import "PDToolpathView.h"
@@ -266,6 +267,233 @@ static CAShapeLayer *PDChevron(UIColor *c) {
 - (void)tap:(UIButton *)b { if (self.picked) self.picked([[PDColorPicker palette] objectAtIndex:(NSUInteger)b.tag]); }
 @end
 
+#pragma mark - Flushing volumes
+
+// ElegooSlicer's "Flushing volumes" dialog: how much (mm³) to purge when the CANVAS switches from one slot (row)
+// to another (column), a multiplier, and whether the volumes follow the slot colours (ElegooSlicer's rule).
+@interface PDFlushEditor : UIViewController <UITextFieldDelegate>
+@property (nonatomic, strong) NSMutableArray *fields;      // 16, row-major; diagonal nil (NSNull)
+@property (nonatomic, strong) NSMutableArray *rowSwatches, *colSwatches;
+@property (nonatomic, strong) UILabel *mulLabel, *note;
+@property (nonatomic, strong) UISwitch *autoSwitch;
+@end
+
+@implementation PDFlushEditor
+- (id)init {
+	if ((self = [super init])) self.contentSizeForViewInPopover = CGSizeMake(440, 500);
+	return self;
+}
+- (void)dealloc { [[NSNotificationCenter defaultCenter] removeObserver:self]; }
+- (void)loadView {
+	UIView *v = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 440, 500)];
+	v.backgroundColor = [UIColor colorWithWhite:0.15 alpha:1];
+	UILabel *t = PDSL(PDBoldFont(17), [UIColor whiteColor], NSTextAlignmentLeft);
+	t.text = @"Flushing volumes (mm³)";
+	t.frame = CGRectMake(16, 12, 300, 24);
+	[v addSubview:t];
+	UILabel *hint = PDSL([UIFont systemFontOfSize:12], PD_DIM, NSTextAlignmentLeft);
+	hint.text = @"Row: the slot being unloaded · column: the slot loaded next";
+	hint.frame = CGRectMake(16, 36, 410, 16);
+	[v addSubview:hint];
+	CGFloat x0 = 70, y0 = 62, cw = 84, ch = 40;
+	self.fields = [NSMutableArray array];
+	self.rowSwatches = [NSMutableArray array];
+	self.colSwatches = [NSMutableArray array];
+	for (int i = 0; i < PD_SLOTS; i++) {
+		UILabel *c = PDSL(PDBoldFont(14), [UIColor whiteColor], NSTextAlignmentCenter);
+		c.frame = CGRectMake(x0 + i * cw, y0, cw - 8, 28);
+		c.layer.cornerRadius = 6; c.layer.borderWidth = 1; c.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.25].CGColor;
+		c.text = [NSString stringWithFormat:@"%d", i + 1];
+		[v addSubview:c]; [self.colSwatches addObject:c];
+		UILabel *r = PDSL(PDBoldFont(14), [UIColor whiteColor], NSTextAlignmentCenter);
+		r.frame = CGRectMake(16, y0 + 36 + i * ch + 6, 44, 28);
+		r.layer.cornerRadius = 6; r.layer.borderWidth = 1; r.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.25].CGColor;
+		r.text = [NSString stringWithFormat:@"%d", i + 1];
+		[v addSubview:r]; [self.rowSwatches addObject:r];
+	}
+	for (int a = 0; a < PD_SLOTS; a++) for (int b = 0; b < PD_SLOTS; b++) {
+		CGRect f = CGRectMake(x0 + b * cw, y0 + 36 + a * ch + 3, cw - 8, ch - 6);
+		if (a == b) {
+			UILabel *d = PDSL([UIFont systemFontOfSize:15], PD_FAINT, NSTextAlignmentCenter);
+			d.text = @"—"; d.frame = f;
+			[v addSubview:d];
+			[self.fields addObject:[NSNull null]];
+			continue;
+		}
+		UITextField *tf = [[UITextField alloc] initWithFrame:f];
+		tf.borderStyle = UITextBorderStyleRoundedRect;
+		tf.textAlignment = NSTextAlignmentCenter;
+		tf.font = [UIFont systemFontOfSize:16];
+		tf.keyboardType = UIKeyboardTypeNumbersAndPunctuation;
+		tf.returnKeyType = UIReturnKeyDone;
+		tf.delegate = self;
+		tf.tag = a * PD_SLOTS + b;
+		tf.accessibilityLabel = [NSString stringWithFormat:@"Flush %d to %d", a + 1, b + 1];
+		[v addSubview:tf];
+		[self.fields addObject:tf];
+	}
+	CGFloat y = y0 + 36 + PD_SLOTS * ch + 14;
+	UILabel *ml = PDSL([UIFont systemFontOfSize:15], [UIColor whiteColor], NSTextAlignmentLeft);
+	ml.text = @"Multiplier"; ml.frame = CGRectMake(16, y, 120, 36);
+	[v addSubview:ml];
+	UIButton *minus = PDSmallButton(@"−", PD_ACCENT), *plus = PDSmallButton(@"+", PD_ACCENT);
+	minus.frame = CGRectMake(250, y, 48, 36); plus.frame = CGRectMake(376, y, 48, 36);
+	minus.tag = -1; plus.tag = 1;
+	[minus addTarget:self action:@selector(stepMul:) forControlEvents:UIControlEventTouchUpInside];
+	[plus addTarget:self action:@selector(stepMul:) forControlEvents:UIControlEventTouchUpInside];
+	[v addSubview:minus]; [v addSubview:plus];
+	self.mulLabel = PDSL(PDBoldFont(16), [UIColor whiteColor], NSTextAlignmentCenter);
+	self.mulLabel.frame = CGRectMake(300, y, 74, 36);
+	[v addSubview:self.mulLabel];
+	y += 46;
+	UILabel *al = PDSL([UIFont systemFontOfSize:15], [UIColor whiteColor], NSTextAlignmentLeft);
+	al.text = @"Follow the slot colours"; al.frame = CGRectMake(16, y, 260, 32);
+	[v addSubview:al];
+	self.autoSwitch = [[UISwitch alloc] init];
+	self.autoSwitch.onTintColor = PD_ACCENT;
+	self.autoSwitch.frame = CGRectMake(424 - self.autoSwitch.bounds.size.width, y + 2, self.autoSwitch.bounds.size.width, self.autoSwitch.bounds.size.height);
+	[self.autoSwitch addTarget:self action:@selector(autoChanged) forControlEvents:UIControlEventValueChanged];
+	[v addSubview:self.autoSwitch];
+	y += 42;
+	UIButton *calc = PDSmallButton(@"Calculate from colours", PD_ACCENT);
+	calc.frame = CGRectMake(16, y, 408, 38);
+	[calc addTarget:self action:@selector(calculate) forControlEvents:UIControlEventTouchUpInside];
+	[v addSubview:calc];
+	y += 46;
+	self.note = PDSL([UIFont systemFontOfSize:12], PD_DIM, NSTextAlignmentLeft);
+	self.note.numberOfLines = 4;
+	self.note.frame = CGRectMake(16, y, 408, 66);
+	self.note.text = @"ElegooSlicer's rule: lighter after darker costs most. Each change purges volume × multiplier ÷ 2.405 mm² of filament (M6211 L…). PrintDeck slices one slot per model, so these go in the file for the CANVAS and for multi-colour use.";
+	[v addSubview:self.note];
+	self.view = v;
+	[[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(refresh) name:PDFilamentSlotsChangedNotification object:nil];
+	[self refresh];
+}
+- (void)refresh {
+	NSArray *slots = [PDFilamentSlots slots];
+	for (int i = 0; i < PD_SLOTS; i++) {
+		UIColor *c = PDColorFromHex([[slots objectAtIndex:(NSUInteger)i] objectForKey:@"color"]);
+		CGFloat r = 0, g = 0, b = 0, a = 1;
+		const CGFloat *k = CGColorGetComponents(c.CGColor);
+		if (CGColorGetNumberOfComponents(c.CGColor) >= 3) { r = k[0]; g = k[1]; b = k[2]; }
+		(void)a;
+		UIColor *text = 0.3 * r + 0.59 * g + 0.11 * b > 0.6 ? [UIColor blackColor] : [UIColor whiteColor];
+		for (UILabel *l in [NSArray arrayWithObjects:[self.rowSwatches objectAtIndex:(NSUInteger)i], [self.colSwatches objectAtIndex:(NSUInteger)i], nil]) { l.backgroundColor = c; l.textColor = text; }
+	}
+	for (NSUInteger i = 0; i < [self.fields count]; i++) {
+		UITextField *tf = [self.fields objectAtIndex:i];
+		if (![tf isKindOfClass:[UITextField class]] || tf.isFirstResponder) continue;
+		tf.text = [NSString stringWithFormat:@"%.0f", [PDFilamentSlots flushFrom:(int)i / PD_SLOTS to:(int)i % PD_SLOTS]];
+	}
+	self.mulLabel.text = [NSString stringWithFormat:@"%.1f", [PDFilamentSlots flushMultiplier]];
+	self.autoSwitch.on = [PDFilamentSlots autoFlush];
+}
+- (BOOL)textFieldShouldReturn:(UITextField *)tf { [tf resignFirstResponder]; return YES; }
+- (void)textFieldDidEndEditing:(UITextField *)tf {
+	NSString *t = [tf.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+	int a = (int)tf.tag / PD_SLOTS, b = (int)tf.tag % PD_SLOTS;
+	if ([t length] && [t doubleValue] != [PDFilamentSlots flushFrom:a to:b]) [PDFilamentSlots setFlush:[t doubleValue] from:a to:b];
+	[self refresh];
+}
+- (void)stepMul:(UIButton *)b { [PDFilamentSlots setFlushMultiplier:[PDFilamentSlots flushMultiplier] + 0.1 * b.tag]; }
+- (void)autoChanged { [PDFilamentSlots setAutoFlush:self.autoSwitch.on]; }
+- (void)calculate { [self.view endEditing:YES]; [PDFilamentSlots recalculateFlush]; }
+@end
+
+#pragma mark - Print options
+
+// After "Print plate": the options the printer's own start screen asks for (plate side, time-lapse, levelling),
+// remembered for next time, then Print (upload + start) or Upload only.
+static NSString *const PDPrintPlateKey = @"PDPrintPlate", *const PDPrintTimelapseKey = @"PDPrintTimelapse", *const PDPrintLevelKey = @"PDPrintLevel";
+
+@interface PDPrintOptions : UIViewController
+@property (nonatomic, copy) NSString *summary;
+@property (nonatomic) BOOL cosmos;
+@property (nonatomic, strong) UISegmentedControl *plate;
+@property (nonatomic, strong) UISwitch *timelapse, *level;
+@property (nonatomic, copy) void (^chosen)(NSDictionary *options, BOOL print);
+@end
+
+@implementation PDPrintOptions
+- (id)init {
+	if ((self = [super init])) self.contentSizeForViewInPopover = CGSizeMake(420, 400);
+	return self;
+}
+- (UILabel *)rowLabel:(NSString *)t hint:(NSString *)h y:(CGFloat)y in:(UIView *)v {
+	UILabel *l = PDSL(PDBoldFont(16), [UIColor whiteColor], NSTextAlignmentLeft);
+	l.text = t; l.frame = CGRectMake(16, y, 260, 22);
+	[v addSubview:l];
+	UILabel *hl = PDSL([UIFont systemFontOfSize:12], PD_DIM, NSTextAlignmentLeft);
+	hl.text = h; hl.frame = CGRectMake(16, y + 22, 300, 16);
+	[v addSubview:hl];
+	return l;
+}
+- (UISwitch *)switchAt:(CGFloat)y on:(BOOL)on label:(NSString *)label in:(UIView *)v {
+	UISwitch *sw = [[UISwitch alloc] init];
+	sw.onTintColor = PD_ACCENT;
+	sw.on = on;
+	sw.accessibilityLabel = label;
+	sw.frame = CGRectMake(404 - sw.bounds.size.width, y + 4, sw.bounds.size.width, sw.bounds.size.height);
+	[v addSubview:sw];
+	return sw;
+}
+- (void)loadView {
+	NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+	UIView *v = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 420, 400)];
+	v.backgroundColor = [UIColor colorWithWhite:0.15 alpha:1];
+	UILabel *t = PDSL(PDBoldFont(18), [UIColor whiteColor], NSTextAlignmentLeft);
+	t.text = @"Print options"; t.frame = CGRectMake(16, 12, 388, 24);
+	[v addSubview:t];
+	UILabel *sum = PDSL([UIFont systemFontOfSize:13], PD_DIM, NSTextAlignmentLeft);
+	sum.numberOfLines = 2; sum.text = self.summary; sum.frame = CGRectMake(16, 38, 388, 34);
+	[v addSubview:sum];
+
+	CGFloat y = 84;
+	[self rowLabel:@"Plate type" hint:@"The side of the build plate that's facing up" y:y in:v];
+	self.plate = [[UISegmentedControl alloc] initWithItems:[NSArray arrayWithObjects:@"Textured PEI", @"Smooth PEI", nil]];
+	self.plate.segmentedControlStyle = UISegmentedControlStyleBar;
+	self.plate.tintColor = [UIColor colorWithWhite:0.3 alpha:1];
+	[self.plate setTitleTextAttributes:[NSDictionary dictionaryWithObjectsAndKeys:PDBoldFont(14), UITextAttributeFont, nil] forState:UIControlStateNormal];
+	self.plate.frame = CGRectMake(16, y + 44, 388, 36);
+	self.plate.selectedSegmentIndex = [ud integerForKey:PDPrintPlateKey] == 1 ? 1 : 0;
+	[v addSubview:self.plate];
+	y += 98;
+	[self rowLabel:@"Time-lapse" hint:@"The chamber camera takes a frame every layer" y:y in:v];
+	self.timelapse = [self switchAt:y on:[ud boolForKey:PDPrintTimelapseKey] label:@"Time-lapse" in:v];
+	y += 54;
+	[self rowLabel:@"Auto bed leveling" hint:@"Probe the bed before printing (adds a few minutes)" y:y in:v];
+	self.level = [self switchAt:y on:[ud boolForKey:PDPrintLevelKey] label:@"Auto bed leveling" in:v];
+	y += 54;
+	UILabel *note = PDSL([UIFont systemFontOfSize:12], self.cosmos ? PD_AMBER : PD_DIM, NSTextAlignmentLeft);
+	note.numberOfLines = 2;
+	note.text = self.cosmos ? @"COSMOS (Klipper) starts prints without these options; set them in your start G-code."
+		: @"Make sure the bed is clear before printing.";
+	note.frame = CGRectMake(16, y, 388, 32);
+	[v addSubview:note];
+	y += 40;
+	UIButton *up = PDSmallButton(@"Upload only", PD_ACCENT);
+	up.frame = CGRectMake(16, y, 150, 44);
+	[up addTarget:self action:@selector(uploadOnly) forControlEvents:UIControlEventTouchUpInside];
+	[v addSubview:up];
+	UIButton *pr = PDButton(@"Print", PD_GREEN);
+	pr.titleLabel.font = PDBoldFont(17);
+	pr.frame = CGRectMake(176, y, 228, 44);
+	[pr addTarget:self action:@selector(print) forControlEvents:UIControlEventTouchUpInside];
+	[v addSubview:pr];
+	self.view = v;
+}
+- (NSDictionary *)options {
+	NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+	[ud setInteger:self.plate.selectedSegmentIndex forKey:PDPrintPlateKey];
+	[ud setBool:self.timelapse.on forKey:PDPrintTimelapseKey];
+	[ud setBool:self.level.on forKey:PDPrintLevelKey];
+	return [NSDictionary dictionaryWithObjectsAndKeys:[NSNumber numberWithInteger:self.plate.selectedSegmentIndex], @"plate",
+		[NSNumber numberWithBool:self.timelapse.on], @"timelapse", [NSNumber numberWithBool:self.level.on], @"level", nil];
+}
+- (void)uploadOnly { if (self.chosen) self.chosen([self options], NO); }
+- (void)print { if (self.chosen) self.chosen([self options], YES); }
+@end
+
 #pragma mark - Settings cell
 
 // One settings row, Orca style: the label on the left, its value control on the right: −/+ around the value
@@ -452,6 +680,8 @@ static NSString *const PDSliceSchemeKey = @"PDSliceColorScheme";
 @property (nonatomic, strong) NSMutableDictionary *cells;
 @property (nonatomic, copy) NSString *editor;                        // "process" | "filament" | "printer"
 @property (nonatomic, strong) NSArray *shownSections;
+@property (nonatomic, strong) NSArray *slotBadges, *slotSwatches, *slotCombos;   // the 4 CANVAS slots
+@property (nonatomic, strong) UIButton *canvasButton, *flushButton;
 // canvas
 @property (nonatomic, strong) PDModelView *modelView;
 @property (nonatomic, strong) PDToolpathView *previewView;
@@ -543,6 +773,36 @@ static UIView *PDOverlayBox(void) {
 		self.swatch = [UIButton buttonWithType:UIButtonTypeCustom];
 		self.swatch.layer.cornerRadius = 8; self.swatch.layer.borderWidth = 2; self.swatch.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.3].CGColor;
 		[self.swatch addTarget:self action:@selector(pickColor:) forControlEvents:UIControlEventTouchUpInside];
+		// Filament: the four CANVAS slots, numbered. The highlighted number is the slot the model prints with; the
+		// Edit button belongs to that slot (it is the Filament editor). Tap another number to print with that slot.
+		NSMutableArray *badges = [NSMutableArray array], *swatches = [NSMutableArray array], *combos = [NSMutableArray array];
+		for (int i = 0; i < PD_SLOTS; i++) {
+			UIButton *b = [UIButton buttonWithType:UIButtonTypeCustom];
+			[b setTitle:[NSString stringWithFormat:@"%d", i + 1] forState:UIControlStateNormal];
+			b.titleLabel.font = PDBoldFont(17);
+			b.layer.cornerRadius = 8; b.layer.borderWidth = 1.5;
+			b.tag = i;
+			b.accessibilityLabel = [NSString stringWithFormat:@"Print with slot %d", i + 1];
+			[b addTarget:self action:@selector(slotBadgeTap:) forControlEvents:UIControlEventTouchUpInside];
+			[badges addObject:b];
+			UIButton *sw = [UIButton buttonWithType:UIButtonTypeCustom];
+			sw.layer.cornerRadius = 8; sw.layer.borderWidth = 2; sw.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.3].CGColor;
+			sw.tag = i;
+			sw.accessibilityLabel = [NSString stringWithFormat:@"Slot %d colour", i + 1];
+			[sw addTarget:self action:@selector(pickColor:) forControlEvents:UIControlEventTouchUpInside];
+			[swatches addObject:sw];
+			PDComboButton *c = [PDComboButton combo];
+			c.tag = i;
+			[c addTarget:self action:@selector(pickFilament:) forControlEvents:UIControlEventTouchUpInside];
+			[combos addObject:c];
+		}
+		self.slotBadges = badges; self.slotSwatches = swatches; self.slotCombos = combos;
+		self.canvasButton = PDSmallButton(@"From CANVAS", PD_ACCENT);
+		self.canvasButton.titleLabel.font = PDBoldFont(12);
+		[self.canvasButton addTarget:self action:@selector(fillFromCanvas) forControlEvents:UIControlEventTouchUpInside];
+		self.flushButton = PDSmallButton(@"Flushing…", PD_ACCENT);
+		self.flushButton.titleLabel.font = PDBoldFont(12);
+		[self.flushButton addTarget:self action:@selector(editFlushing:) forControlEvents:UIControlEventTouchUpInside];
 		self.editorTitle = PDSL(PDBoldFont(15), [UIColor whiteColor], NSTextAlignmentLeft);
 		self.saveButton = PDSmallButton(@"Save as…", PD_ACCENT);
 		self.saveButton.titleLabel.font = PDBoldFont(13);
@@ -640,7 +900,9 @@ static UIView *PDOverlayBox(void) {
 			self.modelButton, self.rotLeft, self.rotRight, self.layButton, self.tipButton, self.resetButton, self.scaleDown, self.scaleUp, self.scaleLabel,
 			self.sliderHolder, self.layerUp, self.layerDown, self.layerLabel, self.legend, self.statusBox, nil]) [self addSubview:v];
 		for (UIView *v in [NSArray arrayWithObjects:self.printerCaption, self.printerCombo, self.printerEdit, nil]) [self.printerPanel addSubview:v];
-		for (UIView *v in [NSArray arrayWithObjects:self.filamentCaption, self.swatch, self.filamentCombo, self.filamentEdit, nil]) [self.filamentPanel addSubview:v];
+		for (UIView *v in [NSArray arrayWithObjects:self.filamentCaption, self.canvasButton, self.flushButton, nil]) [self.filamentPanel addSubview:v];
+		for (int i = 0; i < PD_SLOTS; i++) for (NSArray *a in [NSArray arrayWithObjects:self.slotBadges, self.slotSwatches, self.slotCombos, nil]) [self.filamentPanel addSubview:[a objectAtIndex:(NSUInteger)i]];
+		[self.filamentPanel addSubview:self.filamentEdit];
 		for (UIView *v in [NSArray arrayWithObjects:self.processCaption, self.processCombo, nil]) [self.processPanel addSubview:v];
 
 		self.swipe = [[UISwipeGestureRecognizer alloc] initWithTarget:self action:@selector(back)];
@@ -651,6 +913,7 @@ static UIView *PDOverlayBox(void) {
 		NSNotificationCenter *nc = [NSNotificationCenter defaultCenter];
 		[nc addObserver:self selector:@selector(update) name:PDSlicerNotification object:nil];
 		[nc addObserver:self selector:@selector(settingsChanged) name:PDSliceSettingsChangedNotification object:nil];
+		[nc addObserver:self selector:@selector(slotsChanged) name:PDFilamentSlotsChangedNotification object:nil];
 		[nc addObserver:self selector:@selector(update) name:PDPrinterDidUpdateNotification object:nil];
 		[nc addObserver:self selector:@selector(update) name:PDPrinterConnectionNotification object:nil];
 
@@ -700,19 +963,26 @@ static UIView *PDOverlayBox(void) {
 	self.sliceButton.frame = CGRectMake(W - pad - 140 - 10 - 140, 12, 140, 44);
 
 	// sidebar panels
-	CGFloat y = 68, ph = 64;
+	CGFloat y = 68, ph = 64, rowH = 38, fh = 26 + PD_SLOTS * rowH + 4;
 	self.printerPanel.frame = CGRectMake(pad, y, sw, ph);
-	self.filamentPanel.frame = CGRectMake(pad, y + ph + 6, sw, ph);
-	self.processPanel.frame = CGRectMake(pad, y + 2 * (ph + 6), sw, ph);
+	self.filamentPanel.frame = CGRectMake(pad, y + ph + 6, sw, fh);
+	self.processPanel.frame = CGRectMake(pad, y + ph + 6 + fh + 6, sw, ph);
 	for (UILabel *l in [NSArray arrayWithObjects:self.printerCaption, self.filamentCaption, self.processCaption, nil]) l.frame = CGRectMake(12, 4, 200, 16);
 	self.printerCombo.frame = CGRectMake(10, 21, sw - 20 - 70, 36);
 	self.printerEdit.frame = CGRectMake(sw - 74, 21, 64, 36);
-	self.swatch.frame = CGRectMake(10, 21, 36, 36);
-	self.filamentCombo.frame = CGRectMake(52, 21, sw - 62 - 70, 36);
-	self.filamentEdit.frame = CGRectMake(sw - 74, 21, 64, 36);
+	self.flushButton.frame = CGRectMake(sw - 10 - 84, 3, 84, 22);
+	self.canvasButton.frame = CGRectMake(sw - 10 - 84 - 6 - 100, 3, 100, 22);
+	int act = [PDFilamentSlots activeSlot];
+	for (int i = 0; i < PD_SLOTS; i++) {
+		CGFloat ry = 26 + i * rowH;
+		[(UIView *)[self.slotBadges objectAtIndex:(NSUInteger)i] setFrame:CGRectMake(10, ry, 30, rowH - 4)];
+		[(UIView *)[self.slotSwatches objectAtIndex:(NSUInteger)i] setFrame:CGRectMake(46, ry, 34, rowH - 4)];
+		[(UIView *)[self.slotCombos objectAtIndex:(NSUInteger)i] setFrame:CGRectMake(86, ry, sw - 86 - 10 - (i == act ? 70 : 0), rowH - 4)];
+	}
+	self.filamentEdit.frame = CGRectMake(sw - 74, 26 + act * rowH, 64, rowH - 4);
 	self.processCombo.frame = CGRectMake(10, 21, sw - 20, 36);
 
-	CGFloat ey = y + 3 * (ph + 6) + 2;
+	CGFloat ey = y + 2 * (ph + 6) + fh + 6 + 2;
 	BOOL process = [self.editor isEqualToString:@"process"];
 	CGSize ss = self.advancedSwitch.bounds.size;
 	CGFloat rx = pad + sw - ss.width;
@@ -826,7 +1096,22 @@ static UIView *PDOverlayBox(void) {
 	};
 	[self.printerCombo setTitle:T(@"printer", [NSString stringWithFormat:@"Centauri Carbon %g nozzle", [PDSliceSettings numberForKey:@"nozzle"]]) forState:UIControlStateNormal];
 	NSString *fname = [PDSliceSettings valueForKey:@"filamentName"];
-	[self.filamentCombo setTitle:T(@"filament", [fname length] ? fname : [NSString stringWithFormat:@"Generic %@", [PDSliceSettings valueForKey:@"material"]]) forState:UIControlStateNormal];
+	NSString *activeTitle = T(@"filament", [fname length] ? fname : [NSString stringWithFormat:@"Generic %@", [PDSliceSettings valueForKey:@"material"]]);
+	int act = [PDFilamentSlots activeSlot];
+	NSArray *slots = [PDFilamentSlots slots];
+	for (int i = 0; i < PD_SLOTS; i++) {
+		NSDictionary *sl = [slots objectAtIndex:(NSUInteger)i];
+		BOOL on = i == act;
+		UIButton *b = [self.slotBadges objectAtIndex:(NSUInteger)i];
+		b.backgroundColor = on ? PD_ACCENT : [UIColor colorWithWhite:1 alpha:0.06];
+		b.layer.borderColor = (on ? PD_ACCENT : [UIColor colorWithWhite:1 alpha:0.2]).CGColor;
+		[b setTitleColor:on ? [UIColor whiteColor] : PD_DIM forState:UIControlStateNormal];
+		[(UIButton *)[self.slotSwatches objectAtIndex:(NSUInteger)i] setBackgroundColor:PDColorFromHex([sl objectForKey:@"color"])];
+		NSString *title = on ? activeTitle : [NSString stringWithFormat:@"%@%@", [[sl objectForKey:@"user"] boolValue] && [[sl objectForKey:@"profile"] length] ? @"★ " : @"", [sl objectForKey:@"title"] ?: @"—"];
+		if (!on && [[sl objectForKey:@"type"] length] && [title rangeOfString:[sl objectForKey:@"type"]].location == NSNotFound) title = [NSString stringWithFormat:@"%@ · %@", title, [sl objectForKey:@"type"]];
+		[(UIButton *)[self.slotCombos objectAtIndex:(NSUInteger)i] setTitle:title forState:UIControlStateNormal];
+	}
+	[self setNeedsLayout];
 	[self.processCombo setTitle:T(@"process", [NSString stringWithFormat:@"%.2fmm Custom", [PDSliceSettings numberForKey:@"layerHeight"]]) forState:UIControlStateNormal];
 	self.swatch.backgroundColor = PDColorFromHex([PDSliceSettings valueForKey:@"filamentColor"]);
 }
@@ -898,6 +1183,9 @@ static UIView *PDOverlayBox(void) {
 }
 
 - (void)pickFilament:(UIView *)sender {
+	int slot = (int)sender.tag;
+	BOOL forActive = slot == [PDFilamentSlots activeSlot];
+	NSDictionary *slotInfo = [PDFilamentSlots slot:slot];
 	NSString *printer = [[PDSliceProfiles currentPrinter] objectForKey:@"name"];
 	NSString *cur = [[PDSliceProfiles state] objectForKey:@"filament"];
 	BOOL user = [PDSliceProfiles isUser:@"filament"];
@@ -909,7 +1197,8 @@ static UIView *PDOverlayBox(void) {
 		NSDictionary *fs = [f objectForKey:@"settings"];
 		[[byVendor objectForKey:v] addObject:[NSDictionary dictionaryWithObjectsAndKeys:[f objectForKey:@"title"], @"title",
 			[NSString stringWithFormat:@"%@ · nozzle %@ °C · bed %@ °C · fan %@ %%", [f objectForKey:@"type"], [fs objectForKey:@"nozzleTemp"], [fs objectForKey:@"bedTemp"], [fs objectForKey:@"fan"]], @"subtitle",
-			f, @"value", [NSNumber numberWithBool:!user && [cur isEqualToString:[f objectForKey:@"name"]]], @"checked", nil]];
+			f, @"value", [NSNumber numberWithBool:forActive ? (!user && [cur isEqualToString:[f objectForKey:@"name"]])
+				: (![[slotInfo objectForKey:@"user"] boolValue] && [[slotInfo objectForKey:@"profile"] isEqualToString:[f objectForKey:@"name"]])], @"checked", nil]];
 	}
 	NSMutableArray *secs = [NSMutableArray array];
 	for (NSString *v in vendors)
@@ -917,7 +1206,7 @@ static UIView *PDOverlayBox(void) {
 			v == [vendors lastObject] ? [self stockFooter] : nil, @"footer", nil]];
 	[secs insertObject:[self userSectionForEditor:@"filament"] atIndex:0];
 	[self showPicker:secs from:sender width:440 picked:^(id value) {
-		if ([[value objectForKey:@"editor"] length]) [PDSliceProfiles applyUserPreset:value]; else [PDSliceProfiles applyFilament:value];
+		[PDFilamentSlots assignFilament:value user:[[value objectForKey:@"editor"] length] > 0 toSlot:slot];
 	}];
 }
 
@@ -947,7 +1236,8 @@ static UIView *PDOverlayBox(void) {
 - (void)pickColor:(UIView *)sender {
 	PDColorPicker *cp = [[PDColorPicker alloc] init];
 	__weak PDSlicePage *weakSelf = self;
-	cp.picked = ^(NSString *hex) { [weakSelf dismissPopover]; [PDSliceSettings setValue:hex forKey:@"filamentColor"]; };
+	int slot = (int)sender.tag;
+	cp.picked = ^(NSString *hex) { [weakSelf dismissPopover]; [PDFilamentSlots setSlot:slot values:[NSDictionary dictionaryWithObject:hex forKey:@"color"]]; };
 	[self present:cp from:sender];
 }
 
@@ -1200,21 +1490,17 @@ static UIView *PDOverlayBox(void) {
 }
 
 - (void)printTap:(UIButton *)sender {
-	UIActionSheet *a = [[UIActionSheet alloc] initWithTitle:nil delegate:self cancelButtonTitle:nil destructiveButtonTitle:nil otherButtonTitles:@"Upload and print…", @"Upload only", nil];
-	a.tag = 1;
-	[a showFromRect:sender.bounds inView:sender animated:YES];
-}
-
-- (void)actionSheet:(UIActionSheet *)a clickedButtonAtIndex:(NSInteger)i {
-	if (i < 0 || i == a.cancelButtonIndex) return;
-	if (i == 1) { [[PDSlicer shared] uploadAndPrint:NO]; return; }
 	PDSlicer *s = [PDSlicer shared];
-	UIAlertView *al = [[UIAlertView alloc] initWithTitle:@"Upload and print?"
-		message:[NSString stringWithFormat:@"%@\n%@ · %.1f g %@. Make sure the bed is clear.", PDPrettyFileName(s.resultName), PDDuration(s.resultSeconds), s.resultGrams,
-			[PDSliceSettings valueForKey:@"material"]]
-		delegate:self cancelButtonTitle:@"Cancel" otherButtonTitles:@"Print", nil];
-	al.tag = 1;
-	[al show];
+	PDPrintOptions *po = [[PDPrintOptions alloc] init];
+	po.summary = [NSString stringWithFormat:@"%@\n%@ · %.1f g %@ · slot %d", PDPrettyFileName(s.resultName), PDDuration(s.resultSeconds), s.resultGrams,
+		[PDSliceSettings valueForKey:@"material"], [PDFilamentSlots activeSlot] + 1];
+	po.cosmos = [PDPrinter shared].cosmos;
+	__weak PDSlicePage *weakSelf = self;
+	po.chosen = ^(NSDictionary *options, BOOL print) {
+		[weakSelf dismissPopover];
+		if (print) [[PDSlicer shared] uploadAndPrintWithOptions:options]; else [[PDSlicer shared] uploadAndPrint:NO];
+	};
+	[self present:po from:sender];
 }
 
 - (void)confirmResetSettings {
@@ -1227,14 +1513,41 @@ static UIView *PDOverlayBox(void) {
 
 - (void)alertView:(UIAlertView *)a clickedButtonAtIndex:(NSInteger)i {
 	if (i == a.cancelButtonIndex) return;
-	if (a.tag == 1) [[PDSlicer shared] uploadAndPrint:YES];
-	else if (a.tag == 2) [PDSliceProfiles resetToDefaults];
+	if (a.tag == 2) [PDSliceProfiles resetToDefaults];
 	else if (a.tag == 3) [PDSliceProfiles saveUserPreset:[a textFieldAtIndex:0].text editor:self.editor];
 }
 
 #pragma mark State
 
+- (void)slotBadgeTap:(UIButton *)b {
+	if ((int)b.tag == [PDFilamentSlots activeSlot]) return;
+	[PDFilamentSlots setActiveSlot:(int)b.tag];
+	NSDictionary *sl = [PDFilamentSlots slot:(int)b.tag];
+	self.notice = [NSString stringWithFormat:@"The model now prints with slot %d (%@).", (int)b.tag + 1, [sl objectForKey:@"title"]];
+	[self update];
+}
+
+- (void)fillFromCanvas {
+	PDPrinter *p = [PDPrinter shared];
+	if (!p.canvas) [p refreshCanvas];
+	int n = p.canvas ? [PDFilamentSlots fillFromCanvas:p.canvas] : 0;
+	self.notice = n ? [NSString stringWithFormat:@"Took the filament type and colour of %d slot%@ from the CANVAS.", n, n == 1 ? @"" : @"s"]
+		: p.canvas ? @"The CANVAS reports no loaded slots." : @"Waiting for the CANVAS: try again in a moment.";
+	[self update];
+}
+
+- (void)editFlushing:(UIView *)sender {
+	PDFlushEditor *fe = [[PDFlushEditor alloc] init];
+	[self present:fe from:sender];
+}
+
+- (void)slotsChanged {
+	[self updateCombos];
+	[self update];
+}
+
 - (void)settingsChanged {
+	[PDFilamentSlots syncActiveFromSettings];
 	for (PDSettingCell *c in [self.cells allValues]) [c refresh];
 	[self updateCombos];
 	[self updateEditorHeader];
