@@ -11,13 +11,15 @@
 #import "PDFilesCard.h"
 #import "PDDesignPage.h"
 #import "PDSlicePage.h"
+#import "PDSlicer.h"
+#import "PDDesign.h"
 #import "PDSparklineView.h"
 #import "PDUtil.h"
 #import <QuartzCore/QuartzCore.h>
 #import <AudioToolbox/AudioToolbox.h>
 
 enum { PDSheetNozzle = 1, PDSheetBed, PDSheetFan, PDSheetMenu };
-enum { PDAlertStop = 1, PDAlertCustomTemp, PDAlertAddress };
+enum { PDAlertStop = 1, PDAlertCustomTemp, PDAlertAddress, PDAlertClearCache };
 
 static NSString *const PDFanKeys[] = {@"ModelFan", @"AuxiliaryFan", @"BoxFan"};
 static NSString *const PDFanNames[] = {@"Part", @"Aux", @"Chamber"};
@@ -905,7 +907,8 @@ static const int PDSpeeds[] = {50, 100, 130, 160};
 
 - (void)showMenu {
 	UIActionSheet *s = [[UIActionSheet alloc] initWithTitle:nil delegate:self cancelButtonTitle:nil destructiveButtonTitle:nil
-		otherButtonTitles:@"Bed mesh", self.cameraEnabled ? @"Turn camera off" : @"Turn camera on", @"Find printer on Wi-Fi", @"Enter printer address…", @"Reconnect", nil];
+		otherButtonTitles:@"Bed mesh", self.cameraEnabled ? @"Turn camera off" : @"Turn camera on", @"Find printer on Wi-Fi", @"Enter printer address…", @"Reconnect",
+		@"Clear local cache…", nil];
 	s.tag = PDSheetMenu;
 	[s showFromRect:self.menuButton.bounds inView:self.menuButton animated:YES];
 }
@@ -935,8 +938,56 @@ static const int PDSpeeds[] = {50, 100, 130, 160};
 			else if (i == 2) { self.offline.hidden = NO; [self startSearch]; }
 			else if (i == 3) [self promptAddress];
 			else if (i == 4) [p reconnectNow];
+			else if (i == 5) [self askClearCache];
 			break;
 	}
+}
+
+#pragma mark Local cache
+
+// PrintDeck's own folders in Library/Caches (shared with the system, PrintDeck not being sandboxed: only these
+// are touched). The slicer's work folder is left alone while it is slicing or holds a result to send, and the
+// toolpaths while a job is underway.
+- (NSArray *)cacheFolders {
+	NSString *root = [NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES) objectAtIndex:0];
+	NSMutableArray *a = [NSMutableArray arrayWithObject:[root stringByAppendingPathComponent:@"PrintDeckThumbs"]];
+	// During a job the printer sends no files ("device busy"), so its kept toolpath couldn't be fetched again.
+	if (![PDPrinter shared].isBusy) [a addObject:[root stringByAppendingPathComponent:@"toolpaths"]];
+	PDSliceState st = [PDSlicer shared].state;
+	if (st == PDSliceIdle || st == PDSliceFailed) [a addObject:[root stringByAppendingPathComponent:@"slicer"]];
+	return a;
+}
+
+- (unsigned long long)cacheBytes {
+	NSFileManager *fm = [NSFileManager defaultManager];
+	unsigned long long n = 0;
+	for (NSString *d in [self cacheFolders]) {
+		NSDirectoryEnumerator *e = [fm enumeratorAtPath:d];
+		for (NSString *f = [e nextObject]; f; f = [e nextObject]) if (![[[e fileAttributes] fileType] isEqualToString:NSFileTypeDirectory]) n += [[e fileAttributes] fileSize];
+	}
+	return n;
+}
+
+- (void)askClearCache {
+	unsigned long long n = [self cacheBytes];
+	NSString *size = n >= 1048576 ? [NSString stringWithFormat:@"%.1f MB", n / 1048576.0] : [NSString stringWithFormat:@"%llu KB", (n + 1023) / 1024];
+	UIAlertView *a = [[UIAlertView alloc] initWithTitle:@"Clear local cache"
+		message:[NSString stringWithFormat:@"Frees %@ of saved toolpaths, file pictures and slicer files, and the Design page's kept meshes. "
+			@"They are made again when needed. Your designs and models are not touched.", size]
+		delegate:self cancelButtonTitle:@"Cancel" otherButtonTitles:@"Clear", nil];
+	a.tag = PDAlertClearCache;
+	[a show];
+}
+
+- (void)clearCache {
+	NSArray *dirs = [self cacheFolders];
+	[PDShape clearMemoryCaches];
+	dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+		NSFileManager *fm = [NSFileManager defaultManager];
+		for (NSString *d in dirs) for (NSString *f in [fm contentsOfDirectoryAtPath:d error:NULL])   // the folders stay (some are made once)
+			[fm removeItemAtPath:[d stringByAppendingPathComponent:f] error:NULL];
+		NSLog(@"PrintDeck: cleared the local cache");
+	});
 }
 
 - (void)promptCustomTemp:(int)which {
@@ -958,6 +1009,8 @@ static const int PDSpeeds[] = {50, 100, 130, 160};
 		int v = [[a textFieldAtIndex:0].text intValue];
 		if (self.customTempFor == PDSheetNozzle) [p setNozzleTarget:MAX(0, MIN(300, v))];
 		else [p setBedTarget:MAX(0, MIN(110, v))];
+	} else if (a.tag == PDAlertClearCache) {
+		[self clearCache];
 	} else if (a.tag == PDAlertAddress) {
 		NSString *t = [[a textFieldAtIndex:0].text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
 		NSArray *hp = [t componentsSeparatedByString:@":"];

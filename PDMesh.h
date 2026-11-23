@@ -32,6 +32,11 @@ extern NSString *const PDMeshDidUpdateNotification;
 @property (nonatomic, readonly, copy) NSString *lastError;
 @property (nonatomic, readonly) BOOL fetching;
 @property (nonatomic, copy) NSString *helperURL;           // e.g. http://192.168.0.185:7140/mesh ; nil = none
+// Where the shown mesh came from and when ("fetched 22 Nov 14:05", "pasted …", "demo"), and whether the last
+// successful fetch brought the same heights as before. A failed refresh keeps the mesh and sets lastError.
+@property (nonatomic, readonly, copy) NSString *origin;
+@property (nonatomic, readonly) BOOL lastFetchUnchanged;
+// The helper is also asked again by itself a few seconds after the printer finishes levelling its bed.
 
 - (void)fetch;                                             // async; posts PDMeshDidUpdateNotification
 - (BOOL)setPastedText:(NSString *)text error:(NSString **)err;  // manual paste/load path

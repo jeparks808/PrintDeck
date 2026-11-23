@@ -17,6 +17,8 @@
 // A group of the given shapes (world meshes combined with PDCSG; slow for big meshes, so call it off the main
 // thread). Nil when the result is empty (holes that cut everything away).
 + (PDShape *)groupOf:(NSArray *)shapes;
+// The same, telling progress (0…1, step k of n, see PDCSGCombineProgress) on the thread it runs on.
++ (PDShape *)groupOf:(NSArray *)shapes progress:(void (^)(float fraction, int step, int steps))progress;
 
 @property (nonatomic, readonly, copy) NSString *kind;   // a primitive kind, or "group"
 @property (nonatomic, readonly, strong) NSArray *children;   // a group's members (matrices in its unit frame)
@@ -78,6 +80,8 @@
 @property (nonatomic, readonly, copy) NSString *meshName;
 // This shape's world mesh as a binary STL (for the library). NO on failure.
 - (BOOL)writeSTL:(NSString *)path;
+// Drops the in-memory caches of made part / shape-option meshes and imported models (shapes in use keep theirs).
++ (void)clearMemoryCaches;
 @end
 
 // The Library's stored models: STL/OBJ files saved from designs (Documents/PrintDeck/Library) and the models

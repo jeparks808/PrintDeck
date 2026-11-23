@@ -38,6 +38,10 @@ typedef enum {
 @property (nonatomic, readonly) PDJobState jobState;
 @property (nonatomic, readonly) NSString *jobStateText;
 @property (nonatomic, readonly) BOOL isBusy;           // a job is underway (printing/paused/preparing...)
+// The machine is doing something that isn't a job, e.g. auto bed levelling started from the touchscreen's settings
+// (CurrentStatus 5) or calibrating (3). Prints, moves and homing aren't sent then.
+@property (nonatomic, readonly) BOOL machineBusy;
+- (BOOL)refuseWhileMachineBusy;        // YES (and an "error" alert) when machineBusy
 @property (nonatomic, readonly) double progress;       // 0..1
 @property (nonatomic, readonly) double elapsed;        // seconds
 @property (nonatomic, readonly) double remaining;      // seconds, best estimate
@@ -51,7 +55,10 @@ typedef enum {
 - (void)pause;                          // 129
 - (void)resume;                         // 131
 - (void)stop;                           // 130
-- (void)startFile:(NSString *)path;     // 128
+- (void)startFile:(NSString *)path;     // 128 (textured plate, no time-lapse, no levelling)
+// 128 with the print options the printer's own start screen offers: plate 0 = textured PEI (side A),
+// 1 = smooth PEI (side B); time-lapse; auto bed levelling first. COSMOS (Moonraker) ignores the options.
+- (void)startFile:(NSString *)path plate:(int)plate timelapse:(BOOL)timelapse level:(BOOL)level;
 - (void)setNozzleTarget:(int)c;         // 403 TempTargetNozzle
 - (void)setBedTarget:(int)c;            // 403 TempTargetHotbed
 - (void)setSpeedPercent:(int)pct;       // 403 PrintSpeedPct (50 silent, 100 balanced, 130 sport, 160 ludicrous)

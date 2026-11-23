@@ -15,7 +15,34 @@ typedef struct { V n; double w; } Plane;
 typedef struct { int n; V *v; Plane pl; } Poly;
 typedef struct { Poly *a; int n, cap; } PList;
 typedef struct Node { Plane pl; int has; struct Node *front, *back; PList polys; } Node;
-typedef struct { int oom; } Ctx;
+// Progress: the job is a run of operations (each a share of the whole, opBase…opBase + opSpan), each in phases
+// (phBase…phBase + phSpan of the operation); a phase counts its work (polygon splits, output polygons) against
+// an estimate.
+typedef struct {
+	int oom;
+	PDCSGProgressFn fn; void *user;
+	double opBase, opSpan, phBase, phSpan, work, expect;
+	int step, steps, ticks;
+	float last; int lastStep;
+} Ctx;
+
+static void report(Ctx *c, int force) {
+	if (!c->fn) return;
+	double k = c->expect > 0 ? c->work / c->expect : 0;
+	if (k > 0.97) k = 0.97;
+	float f = (float)(c->opBase + c->opSpan * (c->phBase + c->phSpan * k));
+	if (f > 1) f = 1;
+	if (f < c->last) f = c->last;
+	if (!force && f - c->last < 0.004f && c->step == c->lastStep) return;
+	c->last = f; c->lastStep = c->step;
+	c->fn(c->user, f, c->step, c->steps);
+}
+static void tick(Ctx *c) { if (c->fn) { c->work += 1; if ((++c->ticks & 255) == 0) report(c, 0); } }
+static void phase(Ctx *c, double base, double span, double expect) {
+	c->phBase = base; c->phSpan = span; c->work = 0; c->expect = expect > 1 ? expect : 1;
+	report(c, 0);
+}
+static double est(double n) { return n * (n > 2 ? log2(n) : 1); }   // splits to build a tree of n polygons
 
 static V vsub(V a, V b) { V r = {a.x - b.x, a.y - b.y, a.z - b.z}; return r; }
 static double vdot(V a, V b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
@@ -101,6 +128,7 @@ enum { COPLANAR = 0, FRONT = 1, BACK = 2, SPANNING = 3 };
 // Moves p into one of the four lists, split in two if the plane crosses it.
 static void split(Ctx *c, const Plane *pl, Poly p, PList *cf, PList *cb, PList *f, PList *b) {
 	int type = 0, n = p.n;
+	tick(c);
 	int stackTypes[16], *types = n <= 16 ? stackTypes : malloc((size_t)n * sizeof(int));
 	if (!types) { c->oom = 1; poly_free(&p); return; }
 	for (int i = 0; i < n; i++) {
@@ -229,11 +257,19 @@ static Node *tree(Ctx *c, PList *l) {
 // a ∪ b and a − b (both consumed).
 static PList op_union(Ctx *c, PList a, PList b) {
 	if (!a.n || !b.n || !boxes_overlap(&a, &b)) { plist_append(c, &a, &b); return a; }   // apart: both, as they are
-	Node *A = tree(c, &a), *B = tree(c, &b);
+	double na = a.n, nb = b.n, la = na > 2 ? log2(na) : 1, lb = nb > 2 ? log2(nb) : 1;
+	phase(c, 0, 0.2, est(na));
+	Node *A = tree(c, &a);
+	phase(c, 0.2, 0.2, est(nb));
+	Node *B = tree(c, &b);
 	PList out = {0};
 	if (A && B) {
-		clip_to(c, A, B); clip_to(c, B, A); invert(B); clip_to(c, B, A); invert(B);
-		PList bp = {0}; take_all(c, B, &bp); build(c, A, &bp);
+		phase(c, 0.4, 0.12, na * lb * 1.5); clip_to(c, A, B);
+		phase(c, 0.52, 0.12, nb * la * 1.5); clip_to(c, B, A);
+		phase(c, 0.64, 0.12, nb * la * 1.5); invert(B); clip_to(c, B, A); invert(B);
+		PList bp = {0}; take_all(c, B, &bp);
+		phase(c, 0.76, 0.2, est(bp.n)); build(c, A, &bp);
+		phase(c, 0.96, 0.04, 1);
 		take_all(c, A, &out);
 	}
 	node_free(A); node_free(B);
@@ -242,11 +278,19 @@ static PList op_union(Ctx *c, PList a, PList b) {
 
 static PList op_subtract(Ctx *c, PList a, PList b) {
 	if (!a.n || !b.n || !boxes_overlap(&a, &b)) { plist_free(&b); return a; }   // nothing to cut
-	Node *A = tree(c, &a), *B = tree(c, &b);
+	double na = a.n, nb = b.n, la = na > 2 ? log2(na) : 1, lb = nb > 2 ? log2(nb) : 1;
+	phase(c, 0, 0.2, est(na));
+	Node *A = tree(c, &a);
+	phase(c, 0.2, 0.2, est(nb));
+	Node *B = tree(c, &b);
 	PList out = {0};
 	if (A && B) {
-		invert(A); clip_to(c, A, B); clip_to(c, B, A); invert(B); clip_to(c, B, A); invert(B);
-		PList bp = {0}; take_all(c, B, &bp); build(c, A, &bp); invert(A);
+		phase(c, 0.4, 0.12, na * lb * 1.5); invert(A); clip_to(c, A, B);
+		phase(c, 0.52, 0.12, nb * la * 1.5); clip_to(c, B, A);
+		phase(c, 0.64, 0.12, nb * la * 1.5); invert(B); clip_to(c, B, A); invert(B);
+		PList bp = {0}; take_all(c, B, &bp);
+		phase(c, 0.76, 0.2, est(bp.n)); build(c, A, &bp); invert(A);
+		phase(c, 0.96, 0.04, 1);
 		take_all(c, A, &out);
 	}
 	node_free(A); node_free(B);
@@ -300,7 +344,7 @@ static int emit_tri(float **out, int *n, int *cap, V a, V b, V c) {
 	return 1;
 }
 
-static int to_mesh(PList *l, PDCSGMesh *out) {
+static int to_mesh(Ctx *c, PList *l, PDCSGMesh *out) {
 	out->tris = NULL; out->count = 0;
 	int total = 0;
 	for (int i = 0; i < l->n; i++) total += l->a[i].n;
@@ -320,6 +364,7 @@ static int to_mesh(PList *l, PDCSGMesh *out) {
 	if (ok) for (int i = 0; i < cells; i++) head[i] = -1;
 	// Weld.
 	for (int i = 0, k = 0; ok && i < l->n; i++) for (int j = 0; j < l->a[i].n; j++, k++) {
+		if (!j) tick(c);
 		V p = l->a[i].v[j];
 		int ix, iy, iz, found = -1;
 		int cell = cell_of(&vs, p.x, p.y, p.z, &ix, &iy, &iz);
@@ -348,6 +393,7 @@ static int to_mesh(PList *l, PDCSGMesh *out) {
 	for (int i = 0, k0 = 0; ok && i < l->n; k0 += l->a[i].n, i++) {
 		Poly *p = &l->a[i];
 		int nr = 0, inserted = 0;
+		tick(c);
 		for (int j = 0; ok && j < p->n; j++) {
 			int a = idx[k0 + j], b = idx[k0 + (j + 1) % p->n];
 			if (a == b) continue;
@@ -412,22 +458,57 @@ static int to_mesh(PList *l, PDCSGMesh *out) {
 typedef struct {
 	const PDCSGMesh *solids, *holes; int ns, nh;
 	PDCSGMesh *out; int result;
+	PDCSGProgressFn fn; void *user;
 } Job;
 
 static void *run(void *arg) {
 	Job *j = arg;
 	Ctx c = {0};
+	c.fn = j->fn; c.user = j->user;
+	// Each operation's share of the whole, by how many triangles it takes in: merging the k-th solid works on
+	// everything merged so far; cutting works on all of it; the output pass is lighter.
+	double totS = 0, totH = 0, W = 0;
+	for (int i = 0; i < j->ns; i++) totS += j->solids[i].count;
+	for (int i = 0; i < j->nh; i++) totH += j->holes[i].count;
+	double cum = j->ns ? j->solids[0].count : 0;
+	for (int i = 1; i < j->ns; i++) { cum += j->solids[i].count; W += cum; c.steps++; }
+	cum = j->nh ? j->holes[0].count : 0;
+	for (int i = 1; i < j->nh; i++) { cum += j->holes[i].count; W += cum; c.steps++; }
+	if (j->ns && j->nh) { W += 1.5 * (totS + totH); c.steps++; }
+	double wOut = 0.3 * (totS + totH) + 1;
+	W += wOut; c.steps++;
+	#define BEGIN(w) do { c.opBase += c.opSpan; c.opSpan = (w) / W; c.step++; phase(&c, 0, 1, 1); } while (0)
 	PList acc = {0}, cut = {0};
-	for (int i = 0; i < j->ns && !c.oom; i++) { PList m = {0}; plist_from_mesh(&c, &m, &j->solids[i]); acc = op_union(&c, acc, m); }
-	for (int i = 0; i < j->nh && !c.oom; i++) { PList m = {0}; plist_from_mesh(&c, &m, &j->holes[i]); cut = op_union(&c, cut, m); }
+	cum = 0;
+	for (int i = 0; i < j->ns && !c.oom; i++) {
+		cum += j->solids[i].count;
+		if (i) BEGIN(cum);
+		PList m = {0}; plist_from_mesh(&c, &m, &j->solids[i]); acc = op_union(&c, acc, m);
+	}
+	cum = 0;
+	for (int i = 0; i < j->nh && !c.oom; i++) {
+		cum += j->holes[i].count;
+		if (i) BEGIN(cum);
+		PList m = {0}; plist_from_mesh(&c, &m, &j->holes[i]); cut = op_union(&c, cut, m);
+	}
+	if (j->ns && j->nh) BEGIN(1.5 * (totS + totH));
 	PList res = j->ns ? op_subtract(&c, acc, cut) : cut;
-	j->result = c.oom ? -1 : to_mesh(&res, j->out);
+	BEGIN(wOut);
+	phase(&c, 0, 1, 2.0 * res.n);   // weld, then triangulate: a tick per polygon each
+	j->result = c.oom ? -1 : to_mesh(&c, &res, j->out);
+	#undef BEGIN
+	if (c.fn) { c.phBase = 1; c.phSpan = 0; c.opBase = 1; c.opSpan = 0; report(&c, 1); }
 	plist_free(&res);
 	return NULL;
 }
 
 int PDCSGCombine(const PDCSGMesh *solids, int solidCount, const PDCSGMesh *holes, int holeCount, PDCSGMesh *out) {
-	Job j = {solids, holes, solidCount, holeCount, out, -1};
+	return PDCSGCombineProgress(solids, solidCount, holes, holeCount, out, NULL, NULL);
+}
+
+int PDCSGCombineProgress(const PDCSGMesh *solids, int solidCount, const PDCSGMesh *holes, int holeCount, PDCSGMesh *out,
+		PDCSGProgressFn fn, void *user) {
+	Job j = {solids, holes, solidCount, holeCount, out, -1, fn, user};
 	out->tris = NULL; out->count = 0;
 	pthread_attr_t at;
 	pthread_t th;

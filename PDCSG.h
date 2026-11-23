@@ -20,6 +20,13 @@ typedef struct {
 // of the holes (a group made only of holes is a hole).
 int PDCSGCombine(const PDCSGMesh *solids, int solidCount, const PDCSGMesh *holes, int holeCount, PDCSGMesh *out);
 
+// The same, reporting how far it has got: fraction 0…1 (never going back) and which step of how many (one per
+// solid or hole merged in, one for cutting the holes out, one for the output mesh). Called on the CSG thread,
+// at most a few hundred times; fn may be NULL.
+typedef void (*PDCSGProgressFn)(void *user, float fraction, int step, int steps);
+int PDCSGCombineProgress(const PDCSGMesh *solids, int solidCount, const PDCSGMesh *holes, int holeCount, PDCSGMesh *out,
+	PDCSGProgressFn fn, void *user);
+
 void PDCSGFree(PDCSGMesh *m);
 
 #endif

@@ -59,8 +59,8 @@
 	[tv deselectRowAtIndexPath:ip animated:YES];
 	NSArray *files = [PDPrinter shared].files;
 	if ((NSUInteger)ip.row >= [files count]) return;
-	if ([PDPrinter shared].isBusy) {
-		[[[UIAlertView alloc] initWithTitle:@"Printer is busy" message:@"Wait for the current job to finish." delegate:nil cancelButtonTitle:@"OK" otherButtonTitles:nil] show];
+	if ([PDPrinter shared].isBusy || [PDPrinter shared].machineBusy) {
+		[[[UIAlertView alloc] initWithTitle:@"Printer is busy" message:@"Wait for the current job or levelling to finish." delegate:nil cancelButtonTitle:@"OK" otherButtonTitles:nil] show];
 		return;
 	}
 	self.pending = [files objectAtIndex:(NSUInteger)ip.row];
@@ -135,7 +135,7 @@ static const double PDSteps[] = {0.1, 1, 10, 50};
 }
 
 - (BOOL)ok {
-	if (![PDPrinter shared].isBusy) return YES;
+	if (![PDPrinter shared].isBusy && ![PDPrinter shared].machineBusy) return YES;
 	[[[UIAlertView alloc] initWithTitle:@"Printer is busy" message:@"Moving is disabled while a job is running." delegate:nil cancelButtonTitle:@"OK" otherButtonTitles:nil] show];
 	return NO;
 }

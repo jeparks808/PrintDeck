@@ -199,7 +199,7 @@ static UILabel *PDDLabel(UIFont *f, UIColor *c, NSTextAlignment a) {
 	for (NSUInteger i = 0; i < [self.statValues count] && i < [vals count]; i++)
 		[(UILabel *)[self.statValues objectAtIndex:i] setText:[vals objectAtIndex:i]];
 
-	BOOL idle = p.connected && !p.isBusy;
+	BOOL idle = p.connected && !p.isBusy && !p.machineBusy;
 	for (UIButton *b in self.presetButtons) { b.enabled = p.connected; b.alpha = p.connected ? (idle || b.tag == 0 ? 1 : 1) : 0.4; }
 }
 

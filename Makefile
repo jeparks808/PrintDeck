@@ -9,7 +9,7 @@ INSTALL_TARGET_PROCESSES = PrintDeck
 include $(THEOS)/makefiles/common.mk
 
 APPLICATION_NAME = PrintDeck
-PrintDeck_FILES = main.m PDAppDelegate.m PDWebSocket.m PDDiscovery.m PDPrinter.m PDMJPEGView.m PDSparklineView.m PDViews.m PDPanels.m PDMesh.m PDMeshView.m PDDetailView.m PDCardPage.m PDToolpath.m PDToolpathView.m PDFilesCard.m PDCanvasView.m PDSlicer.m PDModelView.m PDSlicePage.m PDCSG.c PDPrimitives.c PDParts.c PDDesign.m PDDesignView.m PDDesignPage.m PDMainViewController.m
+PrintDeck_FILES = main.m PDAppDelegate.m PDWebSocket.m PDDiscovery.m PDPrinter.m PDMJPEGView.m PDSparklineView.m PDViews.m PDPanels.m PDMesh.m PDMeshView.m PDDetailView.m PDCardPage.m PDToolpath.m PDToolpathView.m PDFilesCard.m PDCanvasView.m PDFilaments.m PDSlicer.m PDModelView.m PDSlicePage.m PDCSG.c PDPrimitives.c PDParts.c PDDesign.m PDDesignView.m PDDesignPage.m PDMainViewController.m
 PrintDeck_FRAMEWORKS = UIKit Foundation CoreGraphics QuartzCore CFNetwork AudioToolbox GLKit OpenGLES
 PrintDeck_CFLAGS = -fobjc-arc
 

@@ -196,8 +196,17 @@ static GLKMatrix4 PDMatrixFromArray(NSArray *a) {
 
 #pragma mark Groups
 
+static void PDGroupProgress(void *user, float f, int step, int steps) {
+	void (^b)(float, int, int) = (__bridge void (^)(float, int, int))user;
+	b(f, step, steps);
+}
+
 // Members' world meshes in, the combined mesh out (in the same frame). NO when it comes out empty.
 + (BOOL)combine:(NSArray *)shapes into:(PDCSGMesh *)out hole:(BOOL *)allHoles {
+	return [self combine:shapes into:out hole:allHoles progress:nil];
+}
+
++ (BOOL)combine:(NSArray *)shapes into:(PDCSGMesh *)out hole:(BOOL *)allHoles progress:(void (^)(float, int, int))progress {
 	NSUInteger n = [shapes count];
 	PDCSGMesh *solids = calloc(n ? n : 1, sizeof(PDCSGMesh)), *holes = calloc(n ? n : 1, sizeof(PDCSGMesh));
 	int ns = 0, nh = 0;
@@ -207,7 +216,7 @@ static GLKMatrix4 PDMatrixFromArray(NSArray *a) {
 		if (!m.tris) continue;
 		if (s.hole) holes[nh++] = m; else solids[ns++] = m;
 	}
-	int r = PDCSGCombine(solids, ns, holes, nh, out);
+	int r = PDCSGCombineProgress(solids, ns, holes, nh, out, progress ? PDGroupProgress : NULL, (__bridge void *)progress);
 	for (int i = 0; i < ns; i++) free(solids[i].tris);
 	for (int i = 0; i < nh; i++) free(holes[i].tris);
 	free(solids); free(holes);
@@ -216,11 +225,13 @@ static GLKMatrix4 PDMatrixFromArray(NSArray *a) {
 	return YES;
 }
 
-+ (PDShape *)groupOf:(NSArray *)shapes {
++ (PDShape *)groupOf:(NSArray *)shapes { return [self groupOf:shapes progress:nil]; }
+
++ (PDShape *)groupOf:(NSArray *)shapes progress:(void (^)(float, int, int))progress {
 	if (![shapes count]) return nil;
 	PDCSGMesh out;
 	BOOL allHoles = NO;
-	if (![self combine:shapes into:&out hole:&allHoles]) return nil;
+	if (![self combine:shapes into:&out hole:&allHoles progress:progress]) return nil;
 	GLKVector3 lo = GLKVector3Make(1e30f, 1e30f, 1e30f), hi = GLKVector3Make(-1e30f, -1e30f, -1e30f);
 	for (int i = 0; i < out.count * 3; i++) {
 		GLKVector3 p = GLKVector3Make(out.tris[i * 3], out.tris[i * 3 + 1], out.tris[i * 3 + 2]);
@@ -273,7 +284,8 @@ static GLKMatrix4 PDMatrixFromArray(NSArray *a) {
 	NSMutableDictionary *d = [NSMutableDictionary dictionaryWithObjectsAndKeys:self.kind, @"kind", [NSNumber numberWithBool:self.hole], @"hole",
 		[NSNumber numberWithUnsignedInt:self.color], @"color", PDMatrixArray(self.matrix), @"matrix", nil];
 	if (self.partType) { [d setObject:self.partType forKey:@"partType"]; [d setObject:self.parameters ?: [NSDictionary dictionary] forKey:@"parameters"]; }
-	if (self.meshId) { [d setObject:self.meshId forKey:@"meshId"]; [d setObject:self.meshName ?: @"Model" forKey:@"meshName"]; }
+	if ([self.kind isEqualToString:@"group"] && !self.meshId) [self storeGroupMesh];
+	if (self.meshId) { [d setObject:self.meshId forKey:@"meshId"]; if (!self.children) [d setObject:self.meshName ?: @"Model" forKey:@"meshName"]; }
 	if (self.options) [d setObject:self.options forKey:@"options"];
 	if (self.children) {
 		NSMutableArray *k = [NSMutableArray array];
@@ -290,13 +302,21 @@ static GLKMatrix4 PDMatrixFromArray(NSArray *a) {
 	if ([kind isEqualToString:@"group"]) {
 		NSMutableArray *kids = [NSMutableArray array];
 		for (NSDictionary *c in [d objectForKey:@"children"]) { PDShape *k = [self shapeFromPlist:c]; if (k) [kids addObject:k]; }
-		PDCSGMesh out;
-		if (![kids count] || ![self combine:kids into:&out hole:NULL]) return nil;   // members are already in the unit frame
+		if (![kids count]) return nil;
+		// Its combined mesh as saved (Designs/Meshes), or made again from the members (slow: CSG).
+		NSString *mid = [d objectForKey:@"meshId"];
+		PDMeshData *md = [mid isKindOfClass:[NSString class]] ? [self storedMesh:mid] : nil;
+		if (!md) {
+			PDCSGMesh out;
+			if (![self combine:kids into:&out hole:NULL]) return nil;   // members are already in the unit frame
+			md = [[PDMeshData alloc] init];
+			md->tris = out.tris; md->count = out.count;
+			mid = nil;
+		}
 		s = [[PDShape alloc] init];
 		s.kind = kind;
 		s.children = kids;
-		PDMeshData *md = [[PDMeshData alloc] init];
-		md->tris = out.tris; md->count = out.count;
+		s.meshId = mid;
 		s.mesh = md;
 	} else if ([kind isEqualToString:@"part"]) {
 		NSString *type = [d objectForKey:@"partType"];
@@ -491,10 +511,28 @@ static PDMeshData *PDUnitMesh(float *tris, int count, GLKVector3 *size) {
 	return md;
 }
 
-+ (PDMeshData *)partMesh:(NSString *)t parameters:(NSDictionary *)p size:(GLKVector3 *)size {
+static NSCache *PDPartCache(void) {
 	static NSCache *cache;
 	static dispatch_once_t once;
 	dispatch_once(&once, ^{ cache = [[NSCache alloc] init]; cache.countLimit = 40; });
+	return cache;
+}
+static NSCache *PDOptionCache(void) {
+	static NSCache *cache;
+	static dispatch_once_t once;
+	dispatch_once(&once, ^{ cache = [[NSCache alloc] init]; cache.countLimit = 60; });
+	return cache;
+}
+
++ (void)clearMemoryCaches {
+	[PDPartCache() removeAllObjects];
+	[PDOptionCache() removeAllObjects];
+	NSMutableDictionary *m = [self meshCache];
+	@synchronized (m) { [m removeAllObjects]; }   // imported models: read again from Designs/Meshes when needed
+}
+
++ (PDMeshData *)partMesh:(NSString *)t parameters:(NSDictionary *)p size:(GLKVector3 *)size {
+	NSCache *cache = PDPartCache();
 	NSMutableString *key = [NSMutableString stringWithString:t];
 	for (NSString *k in [[p allKeys] sortedArrayUsingSelector:@selector(compare:)]) [key appendFormat:@"|%@=%@", k, [p objectForKey:k]];
 	NSArray *hit = [cache objectForKey:key];
@@ -625,9 +663,7 @@ static int PDMakeShape(NSString *k, NSDictionary *p, PDCSGMesh *m) {
 }
 
 + (PDMeshData *)optionMesh:(NSString *)kind options:(NSDictionary *)p {
-	static NSCache *cache;
-	static dispatch_once_t once;
-	dispatch_once(&once, ^{ cache = [[NSCache alloc] init]; cache.countLimit = 60; });
+	NSCache *cache = PDOptionCache();
 	NSMutableString *key = [NSMutableString stringWithString:kind];
 	for (NSString *k in [[p allKeys] sortedArrayUsingSelector:@selector(compare:)]) [key appendFormat:@"|%@=%@", k, [p objectForKey:k]];
 	PDMeshData *md = [cache objectForKey:key];
@@ -723,6 +759,22 @@ static int PDMakeShape(NSString *k, NSDictionary *p, PDCSGMesh *m) {
 		[cache setObject:m forKey:mid];
 		return m;
 	}
+}
+
+// A group's combined mesh, kept in Designs/Meshes like an imported model's, so opening the design reads it
+// instead of running the CSG again. Sets meshId (copies share it: the mesh never changes).
+- (void)storeGroupMesh {
+	if (!self.mesh || !self.mesh->count) return;
+	CFUUIDRef u = CFUUIDCreate(NULL);
+	NSString *mid = (__bridge_transfer NSString *)CFUUIDCreateString(NULL, u);
+	CFRelease(u);
+	NSMutableData *d = [NSMutableData dataWithCapacity:4 + (NSUInteger)self.mesh->count * 36];
+	uint32_t n = (uint32_t)self.mesh->count;
+	[d appendBytes:&n length:4];
+	[d appendBytes:self.mesh->tris length:(NSUInteger)n * 36];
+	if (![d writeToFile:[[PDShape meshDirectory] stringByAppendingPathComponent:[mid stringByAppendingPathExtension:@"mesh"]] atomically:YES]) return;
+	@synchronized ([PDShape meshCache]) { [[PDShape meshCache] setObject:self.mesh forKey:mid]; }
+	self.meshId = mid;
 }
 
 + (PDShape *)shapeFromTriangles:(const float *)tris count:(int)count name:(NSString *)name x:(float)x y:(float)y error:(NSString **)error {
@@ -921,6 +973,15 @@ static BOOL PDWriteBinarySTL(NSString *path, const float *tris, int count) {
 	return names;
 }
 
+static BOOL PDHasUnstoredGroup(NSArray *shapes) {
+	if (![shapes isKindOfClass:[NSArray class]]) return NO;
+	for (NSDictionary *s in shapes) {
+		if (![s isKindOfClass:[NSDictionary class]] || ![[s objectForKey:@"kind"] isEqual:@"group"]) continue;
+		if (![s objectForKey:@"meshId"] || PDHasUnstoredGroup([s objectForKey:@"children"])) return YES;
+	}
+	return NO;
+}
+
 + (PDDesign *)loadNamed:(NSString *)name {
 	NSData *data = [NSData dataWithContentsOfFile:[self fileFor:name]];
 	NSDictionary *d = data ? [NSPropertyListSerialization propertyListWithData:data options:0 format:NULL error:NULL] : nil;
@@ -930,6 +991,7 @@ static BOOL PDWriteBinarySTL(NSString *path, const float *tris, int count) {
 	NSMutableArray *shapes = [NSMutableArray array];
 	for (NSDictionary *s in [d objectForKey:@"shapes"]) { PDShape *sh = [PDShape shapeFromPlist:s]; if (sh) [shapes addObject:sh]; }
 	g.shapes = shapes;
+	if (PDHasUnstoredGroup([d objectForKey:@"shapes"])) [g save];   // saved before groups kept their meshes: keep them now
 	return g;
 }
 

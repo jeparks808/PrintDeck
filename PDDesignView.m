@@ -43,7 +43,7 @@ static const char *PDDFS =
 	GLsizei _plateVerts, _minorVerts, _majorVerts, _areaVerts, _edgeVerts;
 	GLKMatrix4 _vp;
 	// drag
-	NSInteger _dragMode;            // 0 none, 1 orbit, 2 slide shapes, 3 move along an axis, 4 turn about an axis
+	NSInteger _dragMode;            // 0 none, 1 orbit, 2 slide shapes, 3 move along an axis, 4 turn about an axis, 5 scale along an axis
 	float _dragZ;
 	// gizmo drags
 	int _gAxis, _hotAxis;           // 0-2; _hotAxis -1 when no handle is held
@@ -52,6 +52,12 @@ static const char *PDDFS =
 	BOOL _gOnPlane, _gRest, _gFine;
 	GLKVector3 _dragStart;
 	NSArray *_dragOriginal;         // matrices (NSValue) of the selected shapes at the start
+	GLKVector3 _gDir;               // the dragged arrow's direction (world)
+	GLKVector3 _gLen0;              // scaling: the shape's axis lengths at the start
+	float _gPct;                    // scaling: the dragged axis's percentage now
+	// Scale mode's 100 %: the size of the shape it was taken from (a new shape object takes a new base)
+	__weak PDShape *_scaleShape;
+	GLKVector3 _scaleBase;
 }
 @property (nonatomic, strong) EAGLContext *ctx;
 @property (nonatomic, strong) GLKView *glView;
@@ -61,6 +67,7 @@ static const char *PDDFS =
 @property (nonatomic, strong) UIView *messageBox;
 @property (nonatomic, strong) UILabel *messageLabel;
 @property (nonatomic, strong) UIActivityIndicatorView *spinner;
+@property (nonatomic, strong) UIProgressView *progressBar;
 @property (nonatomic, strong) UILabel *readout;
 @property (nonatomic, strong) NSArray *marks;          // UILabels over the ruler / protractor
 @property (nonatomic, strong) UILabel *turnInfo;       // Rotate mode: the selection's turn about X, Y, Z
@@ -98,7 +105,7 @@ static const char *PDDFS =
 		dtap.numberOfTapsRequired = 2;
 		for (UIGestureRecognizer *g in [NSArray arrayWithObjects:one, two, pinch, tap, dtap, nil]) [self addGestureRecognizer:g];
 
-		_messageBox = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 300, 50)];
+		_messageBox = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 380, 50)];
 		_messageBox.backgroundColor = [UIColor colorWithWhite:0 alpha:0.7];
 		_messageBox.layer.cornerRadius = 12;
 		_messageBox.hidden = YES;
@@ -106,9 +113,14 @@ static const char *PDDFS =
 		_spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleWhite];
 		_spinner.frame = CGRectMake(16, 15, 20, 20);
 		_messageLabel = PDLabel([UIFont boldSystemFontOfSize:15], [UIColor whiteColor]);
-		_messageLabel.frame = CGRectMake(46, 0, 240, 50);
+		_messageLabel.frame = CGRectMake(46, 0, 320, 50);
+		_progressBar = [[UIProgressView alloc] initWithProgressViewStyle:UIProgressViewStyleBar];
+		_progressBar.frame = CGRectMake(16, 50, 348, 11);
+		_progressBar.hidden = YES;
+		_progress = -1;
 		[_messageBox addSubview:_spinner];
 		[_messageBox addSubview:_messageLabel];
+		[_messageBox addSubview:_progressBar];
 		[self addSubview:_messageBox];
 
 		_hotAxis = -1;
@@ -142,7 +154,7 @@ static const char *PDDFS =
 
 - (void)layoutSubviews {
 	[super layoutSubviews];
-	self.messageBox.center = CGPointMake(CGRectGetMidX(self.bounds), 60);
+	self.messageBox.center = CGPointMake(CGRectGetMidX(self.bounds), 96 + self.messageBox.bounds.size.height / 2);   // under the mode buttons and the rotation / scale line
 	self.readout.frame = CGRectMake(CGRectGetMidX(self.bounds) - 125, self.bounds.size.height - 50, 250, 34);
 }
 
@@ -240,13 +252,27 @@ static GLuint PDDCompile(GLenum type, const char *src) {
 
 - (void)setShapes:(NSArray *)shapes { _shapes = [shapes copy]; [self redraw]; }
 - (void)setSelection:(NSIndexSet *)sel { _selection = [sel copy] ?: [NSIndexSet indexSet]; [self redraw]; }
-- (void)setGizmo:(NSInteger)gizmo { _gizmo = gizmo; [self redraw]; }
+- (void)setGizmo:(NSInteger)gizmo { if (gizmo == 3 && _gizmo != 3) [self resetScaleBase]; _gizmo = gizmo; [self redraw]; }
+- (void)setUniformScale:(BOOL)u { _uniformScale = u; [self redraw]; }
 
 - (void)setMessage:(NSString *)message {
 	_message = [message copy];
 	self.messageLabel.text = message;
 	self.messageBox.hidden = ![message length];
-	if ([message length]) [self.spinner startAnimating]; else [self.spinner stopAnimating];
+	if ([message length]) [self.spinner startAnimating]; else { [self.spinner stopAnimating]; self.progress = -1; }
+}
+
+- (void)setProgress:(float)p {
+	_progress = p;
+	BOOL bar = p >= 0;
+	self.progressBar.hidden = !bar;
+	if (bar) self.progressBar.progress = MIN(1, p);
+	CGRect f = self.messageBox.frame;
+	if (f.size.height != (bar ? 72 : 50)) {
+		f.size.height = bar ? 72 : 50;
+		self.messageBox.frame = f;
+		[self setNeedsLayout];
+	}
 }
 
 - (void)redraw {
@@ -367,6 +393,18 @@ static GLKVector3 PDAxis(int a) { return GLKVector3Make(a == 0, a == 1, a == 2);
 // Handle sizes: a base unit that stays about the same on screen, the arrows' start and end along each axis
 // (from the centre: just outside the selection's box) and the rings' radius.
 - (BOOL)gizmoCentre:(GLKVector3 *)c base:(float *)base from:(float *)from to:(float *)to ring:(float *)ring {
+	if (self.gizmo == 3) {   // along the shape's own axes, from its centre
+		PDShape *s = [self scaleTarget];
+		if (!s) return NO;
+		GLKMatrix4 m = s.matrix;
+		GLKVector3 L = [s axisLengths];
+		*c = GLKVector3Make(m.m[12], m.m[13], m.m[14]);
+		float b = MAX(4.0f, self.distance * 0.06f);
+		*base = b;
+		for (int a = 0; a < 3; a++) { from[a] = L.v[a] / 2 + b * 0.15f; to[a] = from[a] + b * 1.4f; }
+		*ring = b * 2.2f;
+		return YES;
+	}
 	GLKVector3 lo, hi;
 	if (![self selectionLo:&lo hi:&hi]) return NO;
 	*c = GLKVector3MultiplyScalar(GLKVector3Add(lo, hi), 0.5f);
@@ -381,6 +419,75 @@ static GLKVector3 PDAxis(int a) { return GLKVector3Make(a == 0, a == 1, a == 2);
 
 static void PDBasis(int a, GLKVector3 *u, GLKVector3 *v) {   // u × v = axis a
 	*u = PDAxis((a + 1) % 3); *v = PDAxis((a + 2) % 3);
+}
+
+// The handles' directions: the world axes, or in Scale mode the shape's own (unit) axes.
+- (void)gizmoDirs:(GLKVector3 *)d {
+	PDShape *s = self.gizmo == 3 ? [self scaleTarget] : nil;
+	for (int a = 0; a < 3; a++) {
+		d[a] = PDAxis(a);
+		if (!s) continue;
+		GLKMatrix4 m = s.matrix;
+		GLKVector3 col = GLKVector3Make(m.m[a * 4], m.m[a * 4 + 1], m.m[a * 4 + 2]);
+		float l = GLKVector3Length(col);
+		if (l > 1e-6f) d[a] = GLKVector3DivideScalar(col, l);
+	}
+}
+
+#pragma mark Scale
+
+static float PDClampPct(float p) { return MAX(0.1f, MIN(200.0f, p)); }
+static float PDRoundPct(float p) { return p < 10 ? roundf(p * 10) / 10 : roundf(p); }   // drags: 0.1 % steps under 10 %, else 1 %
+
+// The one selected shape in Scale mode, or nil.
+- (PDShape *)scaleTarget {
+	if (self.gizmo != 3 || [self.selection count] != 1) return nil;
+	NSUInteger k = [self.selection firstIndex];
+	return k < [self.shapes count] ? [self.shapes objectAtIndex:k] : nil;
+}
+
+- (GLKVector3)scaleBaseFor:(PDShape *)s {
+	if (s != _scaleShape) { _scaleShape = s; _scaleBase = [s axisLengths]; }
+	return _scaleBase;
+}
+
+- (void)resetScaleBase { _scaleShape = nil; [self redraw]; }
+
+- (BOOL)scalePercent:(GLKVector3 *)pct {
+	PDShape *s = [self scaleTarget];
+	if (!s) return NO;
+	GLKVector3 b = [self scaleBaseFor:s], L = [s axisLengths];
+	for (int a = 0; a < 3; a++) pct->v[a] = b.v[a] > 0 ? L.v[a] / b.v[a] * 100 : 100;
+	return YES;
+}
+
+// s's matrix from orig (axis lengths L0) with axis a at pct % of base (with uniformScale: every axis by the
+// same factor, held so none leaves 0.1…200 %), stretched about its centre, then put back with its bottom at bottom.
+- (void)scaleShape:(PDShape *)s from:(GLKMatrix4)orig lengths:(GLKVector3)L0 base:(GLKVector3)base axis:(int)a percent:(float)pct bottom:(float)bottom {
+	for (int k = 0; k < 3; k++) if (L0.v[k] <= 0 || base.v[k] <= 0) return;
+	GLKVector3 L = L0;
+	pct = PDClampPct(pct);
+	if (self.uniformScale) {
+		float f = pct / 100 * base.v[a] / L0.v[a], lo = 0, hi = 1e30f;
+		for (int k = 0; k < 3; k++) { lo = MAX(lo, 0.001f * base.v[k] / L0.v[k]); hi = MIN(hi, 2.0f * base.v[k] / L0.v[k]); }
+		f = MAX(lo, MIN(hi, f));
+		for (int k = 0; k < 3; k++) L.v[k] = L0.v[k] * f;
+	} else L.v[a] = pct / 100 * base.v[a];
+	GLKMatrix4 m = orig;
+	for (int c = 0; c < 3; c++) for (int k = 0; k < 3; k++) m.m[c * 4 + k] *= L.v[c] / L0.v[c];
+	s.matrix = m;
+	m.m[14] += bottom - [s worldMin].z;
+	s.matrix = m;
+}
+
+- (BOOL)setScalePercent:(float)pct axis:(int)axis {
+	PDShape *s = [self scaleTarget];
+	if (!s || axis < 0 || axis > 2) return NO;
+	GLKVector3 base = [self scaleBaseFor:s];
+	[self scaleShape:s from:s.matrix lengths:[s axisLengths] base:base axis:axis percent:roundf(PDClampPct(pct) * 10) / 10 bottom:[s worldMin].z];
+	[s remakeOptionsMesh];   // fillets and walls stay their size in mm
+	[self redraw];
+	return YES;
 }
 
 - (BOOL)project:(GLKVector3)p to:(CGPoint *)out {
@@ -406,10 +513,12 @@ static CGFloat PDSegDist(CGPoint p, CGPoint a, CGPoint b) {
 	GLKVector3 c; float base, from[3], to[3], ring;
 	if (![self gizmoCentre:&c base:&base from:from to:to ring:&ring]) return -1;
 	int best = -1;
-	CGFloat bestD = self.gizmo == 1 ? 26 : 20;
+	CGFloat bestD = self.gizmo != 2 ? 26 : 20;
+	GLKVector3 dirs[3];
+	[self gizmoDirs:dirs];
 	for (int a = 0; a < 3; a++) {
-		GLKVector3 ax = PDAxis(a);
-		if (self.gizmo == 1) {
+		GLKVector3 ax = dirs[a];
+		if (self.gizmo != 2) {
 			CGPoint s0, s1;
 			if (![self project:GLKVector3Add(c, GLKVector3MultiplyScalar(ax, from[a])) to:&s0]) continue;
 			if (![self project:GLKVector3Add(c, GLKVector3MultiplyScalar(ax, to[a])) to:&s1]) continue;
@@ -436,7 +545,7 @@ static CGFloat PDSegDist(CGPoint p, CGPoint a, CGPoint b) {
 
 // Where along axis a (through the gizmo centre) the ray through p passes closest, in mm from the centre.
 - (BOOL)axisParam:(CGPoint)p out:(float *)t {
-	GLKVector3 o, d, a = PDAxis(_gAxis);
+	GLKVector3 o, d, a = _gDir;
 	[self rayAt:p origin:&o direction:&d];
 	GLKVector3 w = GLKVector3Subtract(_gCentre, o);
 	float b = GLKVector3DotProduct(a, d), den = 1 - b * b;
@@ -490,6 +599,22 @@ static CGFloat PDSegDist(CGPoint p, CGPoint a, CGPoint b) {
 		[self applyToSelection:^GLKMatrix4(GLKMatrix4 m) { m.m[12 + a] += dt; return m; }];
 		_gMoved = dt;
 		self.readout.text = [NSString stringWithFormat:s < 1 ? @"Move %s  %+.1f mm" : @"Move %s  %+.0f mm", names[a], dt];
+	} else if (_dragMode == 5) {
+		float t;
+		PDShape *sh = [self scaleTarget];
+		if (!sh || ![self axisParam:loc out:&t]) return;
+		int a = _gAxis;
+		GLKVector3 base = [self scaleBaseFor:sh];
+		float len = _gLen0.v[a] + 2 * (t - _gT0);   // both ends move: the grabbed face follows the finger
+		float pct = PDRoundPct(PDClampPct(base.v[a] > 0 ? len / base.v[a] * 100 : 100));
+		GLKMatrix4 orig;
+		[[_dragOriginal objectAtIndex:0] getValue:&orig];
+		[self scaleShape:sh from:orig lengths:_gLen0 base:base axis:a percent:pct bottom:_gBottom];
+		GLKVector3 now;
+		[self scalePercent:&now];
+		_gPct = now.v[a];
+		self.readout.text = self.uniformScale ? [NSString stringWithFormat:@"Scale  %g %%  (uniform)", roundf(_gPct * 10) / 10]
+			: [NSString stringWithFormat:@"Scale %s  %g %%", names[a], roundf(_gPct * 10) / 10];
 	} else {
 		float frac = 1, raw = [self axisAngle:loc frac:&frac], d = raw - _gPrev;
 		_gFine = frac > 1.1f;   // inside the pie-slice disc (to just past the ring): 30° snaps; out beyond it: 1° steps
@@ -523,9 +648,13 @@ static CGFloat PDSegDist(CGPoint p, CGPoint a, CGPoint b) {
 	NSMutableArray *sel = [NSMutableArray array];
 	for (NSUInteger k = [self.selection firstIndex]; k != NSNotFound; k = [self.selection indexGreaterThanIndex:k])
 		if (k < [self.shapes count]) [sel addObject:[self.shapes objectAtIndex:k]];
-	self.turnInfo.hidden = self.gizmo != 2 || ![sel count];
+	self.turnInfo.hidden = (self.gizmo != 2 && self.gizmo != 3) || ![sel count];
 	if (self.turnInfo.hidden) return;
-	NSString *t = [NSString stringWithFormat:@"Rotation  %@", [PDShape rotationTextFor:sel]];
+	NSString *t;
+	GLKVector3 pct;
+	if (self.gizmo == 3) t = [self scalePercent:&pct] ? [NSString stringWithFormat:@"Scale  X %g %%  Y %g %%  Z %g %%%@", roundf(pct.x * 10) / 10, roundf(pct.y * 10) / 10,
+		roundf(pct.z * 10) / 10, self.uniformScale ? @"  ·  uniform" : @""] : @"Select one shape to scale it";
+	else t = [NSString stringWithFormat:@"Rotation  %@", [PDShape rotationTextFor:sel]];
 	if (![t isEqualToString:self.turnInfo.text]) {
 		self.turnInfo.text = t;
 		CGSize sz = [t sizeWithFont:self.turnInfo.font];
@@ -577,9 +706,16 @@ static CGFloat PDSegDist(CGPoint p, CGPoint a, CGPoint b) {
 			GLKVector3 c; float base, from[3], to[3], ring;
 			[self gizmoCentre:&c base:&base from:from to:to ring:&ring];
 			_gAxis = axis; _gCentre = c;
+			GLKVector3 dirs[3];
+			[self gizmoDirs:dirs];
+			_gDir = dirs[axis];
 			BOOL ok;
 			if (self.gizmo == 1) ok = [self axisParam:start out:&_gT0];
-			else {
+			else if (self.gizmo == 3) {
+				PDShape *sh = [self scaleTarget];
+				ok = sh && [self axisParam:start out:&_gT0];
+				if (ok) { _gLen0 = [sh axisLengths]; _gBottom = [sh worldMin].z; [self scaleBaseFor:sh]; }
+			} else {
 				GLKVector3 o, d;
 				[self rayAt:start origin:&o direction:&d];
 				_gOnPlane = fabsf(GLKVector3DotProduct(PDAxis(axis), d)) > 0.25f;
@@ -601,7 +737,7 @@ static CGFloat PDSegDist(CGPoint p, CGPoint a, CGPoint b) {
 				ok = YES;
 			}
 			if (ok) {
-				_dragMode = self.gizmo == 1 ? 3 : 4;
+				_dragMode = self.gizmo == 1 ? 3 : self.gizmo == 3 ? 5 : 4;
 				_hotAxis = axis;
 				if (self.willMove) self.willMove();
 				NSMutableArray *orig = [NSMutableArray array];
@@ -639,9 +775,10 @@ static CGFloat PDSegDist(CGPoint p, CGPoint a, CGPoint b) {
 		} else [g setTranslation:CGPointZero inView:self];
 		return;
 	}
-	if (_dragMode == 3 || _dragMode == 4) {
+	if (_dragMode == 3 || _dragMode == 4 || _dragMode == 5) {
 		if (state == UIGestureRecognizerStateChanged || state == UIGestureRecognizerStateEnded) [self gizmoDrag:loc];
 		if (state == UIGestureRecognizerStateEnded || state == UIGestureRecognizerStateCancelled) {
+			if (_dragMode == 5) [[self scaleTarget] remakeOptionsMesh];   // fillets and walls back to their size in mm
 			_dragMode = 0; _dragOriginal = nil; _hotAxis = -1;
 			self.readout.hidden = YES;
 			[self redraw];
@@ -731,11 +868,32 @@ static CGFloat PDSegDist(CGPoint p, CGPoint a, CGPoint b) {
 	int n = 0;
 	#define PDG(P) do { GLKVector3 q_ = (P); L[n * 6] = q_.x; L[n * 6 + 1] = q_.y; L[n * 6 + 2] = q_.z; L[n * 6 + 3] = 0; L[n * 6 + 4] = 0; L[n * 6 + 5] = 1; n++; } while (0)
 	int first[3][3], count[3][3];   // per axis: lines, triangles, guide
+	GLKVector3 dirs[3];
+	[self gizmoDirs:dirs];
 	for (int a = 0; a < 3; a++) {
-		GLKVector3 ax = PDAxis(a), u, v;
+		GLKVector3 ax = dirs[a], u, v;
 		PDBasis(a, &u, &v);
 		first[a][0] = n;
-		if (self.gizmo == 1) {
+		if (self.gizmo == 3) {   // a shaft and a cube, square to the shape's own axes
+			float h = base * 0.2f;
+			GLKVector3 tip = GLKVector3Add(c, GLKVector3MultiplyScalar(ax, to[a]));
+			PDG(GLKVector3Add(c, GLKVector3MultiplyScalar(ax, from[a])));
+			PDG(GLKVector3Add(c, GLKVector3MultiplyScalar(ax, to[a] - h)));
+			count[a][0] = 2;
+			first[a][1] = n;
+			for (int f = 0; f < 3; f++) for (int sgn = -1; sgn <= 1; sgn += 2) {   // two faces per axis
+				GLKVector3 fc = GLKVector3Add(tip, GLKVector3MultiplyScalar(dirs[f], h * sgn));
+				GLKVector3 e1 = GLKVector3MultiplyScalar(dirs[(f + 1) % 3], h), e2 = GLKVector3MultiplyScalar(dirs[(f + 2) % 3], h);
+				GLKVector3 q0 = GLKVector3Subtract(GLKVector3Subtract(fc, e1), e2), q1 = GLKVector3Subtract(GLKVector3Add(fc, e1), e2);
+				GLKVector3 q2 = GLKVector3Add(GLKVector3Add(fc, e1), e2), q3 = GLKVector3Add(GLKVector3Subtract(fc, e1), e2);
+				PDG(q0); PDG(q1); PDG(q2);
+				PDG(q0); PDG(q2); PDG(q3);
+			}
+			count[a][1] = n - first[a][1];
+			first[a][2] = n;
+			PDG(GLKVector3Add(c, GLKVector3MultiplyScalar(ax, -2000))); PDG(GLKVector3Add(c, GLKVector3MultiplyScalar(ax, 2000)));
+			count[a][2] = 2;
+		} else if (self.gizmo == 1) {
 			float headL = base * 0.5f, headR = base * 0.2f;
 			PDG(GLKVector3Add(c, GLKVector3MultiplyScalar(ax, from[a])));
 			PDG(GLKVector3Add(c, GLKVector3MultiplyScalar(ax, to[a] - headL)));
@@ -771,24 +929,30 @@ static CGFloat PDSegDist(CGPoint p, CGPoint a, CGPoint b) {
 	glUniformMatrix4fv(_uMVP, 1, GL_FALSE, _vp.m);
 	glUniform1f(_uLit, 0);
 	glDisable(GL_DEPTH_TEST);
-	BOOL dragging = _dragMode == 3 || _dragMode == 4;
+	BOOL dragging = _dragMode == 3 || _dragMode == 4 || _dragMode == 5;
+	BOOL together = dragging && _dragMode == 5 && self.uniformScale;   // uniform scaling: every handle is held
 	for (int a = 0; a < 3; a++) {
-		if (dragging && a != _hotAxis) continue;
-		BOOL hot = a == _hotAxis;
+		if (dragging && a != _hotAxis && !together) continue;
+		BOOL hot = a == _hotAxis || together;
 		float r = hot ? 1.0f : col[a][0], gg = hot ? 0.84f : col[a][1], b = hot ? 0.25f : col[a][2];
-		if (dragging && self.gizmo == 1) {
+		if (dragging && self.gizmo != 2 && a == _hotAxis) {
 			glLineWidth(1.0f);
 			glUniform4f(_uColor, r, gg, b, 0.45f);
 			glDrawArrays(GL_LINES, first[a][2], count[a][2]);
 		}
 		glUniform4f(_uColor, r, gg, b, 1);
-		glLineWidth(self.gizmo == 1 ? 4.0f : 3.0f);
-		glDrawArrays(self.gizmo == 1 ? GL_LINES : GL_LINE_STRIP, first[a][0], count[a][0]);
+		glLineWidth(self.gizmo != 2 ? 4.0f : 3.0f);
+		glDrawArrays(self.gizmo != 2 ? GL_LINES : GL_LINE_STRIP, first[a][0], count[a][0]);
 		if (count[a][1]) glDrawArrays(GL_TRIANGLES, first[a][1], count[a][1]);
 	}
 	if (_dragMode == 4) [self drawProtractor:c ring:ring];
 	else if (_dragMode == 3) [self drawRuler:c base:base];
-	else [self hideMarks];
+	else if (_dragMode == 5) {   // the percentage by the held cube
+		[self hideMarks];
+		static const char *names[3] = {"X", "Y", "Z"};
+		NSString *t = self.uniformScale ? [NSString stringWithFormat:@"%g %%", roundf(_gPct * 10) / 10] : [NSString stringWithFormat:@"%s %g %%", names[_gAxis], roundf(_gPct * 10) / 10];
+		[self placeMark:12 text:t at:GLKVector3Add(c, GLKVector3MultiplyScalar(dirs[_gAxis], to[_gAxis] + base * 0.9f)) color:[UIColor colorWithRed:1 green:0.84f blue:0.25f alpha:1]];
+	} else [self hideMarks];
 	glLineWidth(1.0f);
 	glEnable(GL_DEPTH_TEST);
 }
@@ -929,7 +1093,7 @@ static CGFloat PDSegDist(CGPoint p, CGPoint a, CGPoint b) {
 	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 	_vp = [self viewProjection];
 	for (PDGLMesh *m in [self.meshes allValues]) m.used = NO;
-	if (_dragMode != 3 && _dragMode != 4) [self hideMarks];
+	if (_dragMode != 3 && _dragMode != 4 && _dragMode != 5) [self hideMarks];
 
 	glUseProgram(_prog);
 	glEnable(GL_DEPTH_TEST);

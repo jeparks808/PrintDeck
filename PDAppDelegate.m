@@ -67,6 +67,7 @@ static void PDDrawGLViews(UIView *root, UIView *v) {
 - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)launchOptions {
 	[application setStatusBarHidden:YES withAnimation:UIStatusBarAnimationNone];
 	application.idleTimerDisabled = YES; // a printer panel should stay on
+	[PDMeshSource shared];   // from the start, so it can fetch a new bed mesh when the printer finishes levelling
 	self.window = [[UIWindow alloc] initWithFrame:[[UIScreen mainScreen] bounds]];
 	self.window.backgroundColor = [UIColor blackColor];
 	self.main = [[PDMainViewController alloc] init];
@@ -96,10 +97,18 @@ static void PDDrawGLViews(UIView *root, UIView *v) {
 // printdeck://zoom?z=<n>                            zoom the visible 3D views (developer aid)
 // printdeck://press?title=<button title>[&n=0]       tap the n-th visible enabled button, table row or segment with that title;
 //                                                     title=slider:<0..1> moves the n-th slider (developer aid)
+// printdeck://type?label=<accessibility label>&text=<text>[&keep=1]   type into a visible text field, then leave it (developer aid)
 // printdeck://drag?x0=&y0=&x1=&y1=[&hold=1]        drag on the Design canvas (screen points; hold: don't lift; drag?release=1 lifts)
 // printdeck://bench                                   spin the job page's 3D view for 4 s, append fps to /tmp/printdeck-toolpath.log
 // An STL handed over with "Open in PrintDeck" lands in Documents/Inbox: move it into the Slice page's model
 // folder (/var/mobile/Documents/PrintDeck) under a free name, and open it for slicing.
+static UIView *PDFindLabelled(UIView *v, NSString *label) {
+	if (v.hidden || v.alpha < 0.01f) return nil;
+	if ([v isKindOfClass:[UITextField class]] && [v.accessibilityLabel isEqualToString:label]) return v;
+	for (UIView *s in v.subviews) { UIView *f = PDFindLabelled(s, label); if (f) return f; }
+	return nil;
+}
+
 - (void)importModel:(NSURL *)url {
 	NSFileManager *fm = [NSFileManager defaultManager];
 	NSString *src = [url path];
@@ -189,6 +198,13 @@ static void PDDrawGLViews(UIView *root, UIView *v) {
 					[table.delegate tableView:table didSelectRowAtIndexPath:ip];
 				}
 			}
+		}
+	} else if ([cmd isEqualToString:@"type"]) {   // developer aid: type text into the visible text field with that accessibility label
+		UITextField *tf = (UITextField *)PDFindLabelled(self.window, [q objectForKey:@"label"] ?: @"");
+		if ([tf isKindOfClass:[UITextField class]]) {
+			[tf becomeFirstResponder];
+			tf.text = [q objectForKey:@"text"] ?: @"";
+			if (![[q objectForKey:@"keep"] boolValue]) [tf resignFirstResponder];
 		}
 	} else if ([cmd isEqualToString:@"lane"]) {   // developer aid: on the CANVAS page, open slot n's (1-based) material/colour picker
 		PDCardPage *pg = (PDCardPage *)PDFindView(self.window, [PDCardPage class]);

@@ -231,6 +231,69 @@ static UIImage *PDPartIcon(NSString *type) {
 }
 @end
 
+// A percentage box for the Scale tool: "X  [−] [ 100 % ] [+]", the box typed into (Return or leaving it applies).
+@interface PDPercentRow : UIView <UITextFieldDelegate>
+@property (nonatomic, strong) UILabel *nameLabel, *unitLabel;
+@property (nonatomic, strong) UIButton *minus, *plus;
+@property (nonatomic, strong) UITextField *field;
+@property (nonatomic, copy) void (^step)(int dir);
+@property (nonatomic, copy) void (^commit)(float value);
+@property (nonatomic, copy) void (^began)(void);
+- (void)showValue:(float)v;
+@end
+
+@implementation PDPercentRow
+- (id)initWithName:(NSString *)name {
+	if ((self = [super initWithFrame:CGRectMake(0, 0, 240, 36)])) {
+		_nameLabel = PDLabel([UIFont boldSystemFontOfSize:14], PD_DIM);
+		_nameLabel.text = name;
+		_unitLabel = PDLabel([UIFont boldSystemFontOfSize:14], PD_DIM);
+		_unitLabel.text = @"%";
+		_minus = PDDButton(@"−", PD_ACCENT, 15);
+		_plus = PDDButton(@"+", PD_ACCENT, 15);
+		_field = [[UITextField alloc] initWithFrame:CGRectZero];
+		_field.font = [UIFont boldSystemFontOfSize:15];
+		_field.textColor = [UIColor whiteColor];
+		_field.textAlignment = NSTextAlignmentCenter;
+		_field.contentVerticalAlignment = UIControlContentVerticalAlignmentCenter;
+		_field.backgroundColor = [UIColor colorWithWhite:1 alpha:0.08];
+		_field.layer.cornerRadius = 8;
+		_field.keyboardType = UIKeyboardTypeNumbersAndPunctuation;
+		_field.returnKeyType = UIReturnKeyDone;
+		_field.clearsOnBeginEditing = NO;
+		_field.accessibilityLabel = [NSString stringWithFormat:@"%@ percent", name];
+		_field.delegate = self;
+		[_minus addTarget:self action:@selector(down) forControlEvents:UIControlEventTouchUpInside];
+		[_plus addTarget:self action:@selector(up) forControlEvents:UIControlEventTouchUpInside];
+		for (UIView *v in [NSArray arrayWithObjects:_nameLabel, _minus, _field, _unitLabel, _plus, nil]) [self addSubview:v];
+	}
+	return self;
+}
+- (void)down { [self.field resignFirstResponder]; if (self.step) self.step(-1); }
+- (void)up { [self.field resignFirstResponder]; if (self.step) self.step(1); }
+- (void)layoutSubviews {
+	CGFloat w = self.bounds.size.width, h = self.bounds.size.height, bw = 44, nw = 24, uw = 18;
+	self.nameLabel.frame = CGRectMake(0, 0, nw, h);
+	self.minus.frame = CGRectMake(nw, 0, bw, h);
+	self.plus.frame = CGRectMake(w - bw, 0, bw, h);
+	self.field.frame = CGRectMake(nw + bw + 6, 0, w - nw - 2 * bw - 12 - uw, h);
+	self.unitLabel.frame = CGRectMake(CGRectGetMaxX(self.field.frame) + 3, 0, uw, h);
+}
+- (void)showValue:(float)v { if (!self.field.isEditing) self.field.text = [NSString stringWithFormat:@"%g", roundf(v * 10) / 10]; }
+- (void)textFieldDidBeginEditing:(UITextField *)tf { if (self.began) self.began(); }
+- (BOOL)textFieldShouldReturn:(UITextField *)tf { [tf resignFirstResponder]; return YES; }
+- (void)textFieldDidEndEditing:(UITextField *)tf {
+	NSScanner *sc = [NSScanner scannerWithString:[tf.text stringByReplacingOccurrencesOfString:@"," withString:@"."]];
+	float v;
+	if ([sc scanFloat:&v] && self.commit) self.commit(v);
+	else if (self.commit) self.commit(NAN);   // not a number: just show the value again
+}
+- (void)setEnabled:(BOOL)on {
+	self.minus.enabled = self.plus.enabled = self.field.enabled = on;
+	self.alpha = on ? 1 : 0.45;
+}
+@end
+
 #pragma mark - Design list
 
 @interface PDDesignList : UITableViewController
@@ -429,6 +492,7 @@ static UIImage *PDPartIcon(NSString *type) {
 // "Models…": saved Library parts and the STL/OBJ models on the iPad, to bring into the design; a link to download one.
 @interface PDDesignModelPicker : UITableViewController
 @property (nonatomic, strong) NSMutableArray *parts, *models;
+@property (nonatomic, strong) NSArray *handy;            // bundled test models: {path, note}
 @property (nonatomic, copy) void (^picked)(NSString *path);
 @property (nonatomic, copy) void (^download)(void);
 @end
@@ -438,6 +502,27 @@ static UIImage *PDPartIcon(NSString *type) {
 	if ((self = [super initWithStyle:UITableViewStylePlain])) {
 		self.parts = [[PDLibrary savedParts] mutableCopy];
 		self.models = [[PDLibrary models] mutableCopy];
+		// Handy models: calibration and test prints, from ElegooSlicer's resources/handy_models (Draco meshes
+		// exported to STL) plus a generated overhang test. Bundled in PrintDeck.app/HandyModels.
+		NSString *dir = [[[NSBundle mainBundle] resourcePath] stringByAppendingPathComponent:@"HandyModels"];
+		NSArray *spec = [NSArray arrayWithObjects:
+			@"Overhang test 20-70", @"Fins at 20° to 70° from vertical, 10° apart",
+			@"All-in-one test (KSR FDM)", @"Overhangs, bridges, stringing, tolerances, text in one",
+			@"Elegoo test cube", @"Elegoo's calibration piece",
+			@"Orca test cube", @"OrcaSlicer's 30 mm calibration cube",
+			@"Voron design cube", @"30 mm dimensional cube",
+			@"Elegoo tolerance test", @"Peg fit from loose to tight",
+			@"Orca tolerance test", @"Peg fit from loose to tight",
+			@"Elegoo stringing test", @"Towers for retraction tuning",
+			@"Orca stringing test", @"Towers for retraction tuning",
+			@"Calicat", @"Calibration cat: dimensions and overhangs",
+			@"Stanford bunny", @"Organic shape, 118 mm tall", nil];
+		NSMutableArray *h = [NSMutableArray array];
+		for (NSUInteger i = 0; i + 1 < [spec count]; i += 2) {
+			NSString *path = [dir stringByAppendingPathComponent:[[spec objectAtIndex:i] stringByAppendingPathExtension:@"stl"]];
+			if ([[NSFileManager defaultManager] fileExistsAtPath:path]) [h addObject:[NSDictionary dictionaryWithObjectsAndKeys:path, @"path", [spec objectAtIndex:i + 1], @"note", nil]];
+		}
+		self.handy = h;
 		UIView *head = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 400, 96)];
 		head.backgroundColor = [UIColor colorWithWhite:0.12 alpha:1];
 		UIButton *b = PDDButton(@"Download from a link…", PD_ACCENT, 15);
@@ -452,16 +537,17 @@ static UIImage *PDPartIcon(NSString *type) {
 		self.tableView.tableHeaderView = head;
 		self.tableView.backgroundColor = [UIColor colorWithWhite:0.12 alpha:1];
 		self.tableView.separatorColor = [UIColor colorWithWhite:1 alpha:0.1];
-		NSUInteger rows = MAX(1, [self.parts count]) + MAX(1, [self.models count]);
-		self.contentSizeForViewInPopover = CGSizeMake(400, MIN(640, 96 + 2 * 30 + 50 * rows));
+		NSUInteger rows = MAX(1, [self.parts count]) + [self.handy count] + MAX(1, [self.models count]);
+		self.contentSizeForViewInPopover = CGSizeMake(400, MIN(640, 96 + 3 * 30 + 50 * rows));
 	}
 	return self;
 }
 - (void)downloadTap { if (self.download) self.download(); }
-- (NSMutableArray *)listFor:(NSInteger)sec { return sec == 0 ? self.parts : self.models; }
-- (NSInteger)numberOfSectionsInTableView:(UITableView *)t { return 2; }
-- (NSString *)tableView:(UITableView *)t titleForHeaderInSection:(NSInteger)sec { return sec == 0 ? @"Saved parts" : @"Models on the iPad"; }
-- (NSInteger)tableView:(UITableView *)t numberOfRowsInSection:(NSInteger)sec { return MAX(1, (NSInteger)[[self listFor:sec] count]); }
+// Sections: 0 saved parts, 1 handy models (bundled, can't be deleted), 2 models on the iPad.
+- (NSMutableArray *)listFor:(NSInteger)sec { return sec == 0 ? self.parts : sec == 2 ? self.models : nil; }
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)t { return 3; }
+- (NSString *)tableView:(UITableView *)t titleForHeaderInSection:(NSInteger)sec { return sec == 0 ? @"Saved parts" : sec == 1 ? @"Handy models" : @"Models on the iPad"; }
+- (NSInteger)tableView:(UITableView *)t numberOfRowsInSection:(NSInteger)sec { return sec == 1 ? (NSInteger)[self.handy count] : MAX(1, (NSInteger)[[self listFor:sec] count]); }
 - (CGFloat)tableView:(UITableView *)t heightForRowAtIndexPath:(NSIndexPath *)ip { return 50; }
 - (UITableViewCell *)tableView:(UITableView *)t cellForRowAtIndexPath:(NSIndexPath *)ip {
 	UITableViewCell *c = [t dequeueReusableCellWithIdentifier:@"m"];
@@ -473,6 +559,14 @@ static UIImage *PDPartIcon(NSString *type) {
 		UIView *sel = [[UIView alloc] init];
 		sel.backgroundColor = [PD_ACCENT colorWithAlphaComponent:0.3];
 		c.selectedBackgroundView = sel;
+	}
+	if (ip.section == 1) {
+		NSDictionary *m = [self.handy objectAtIndex:(NSUInteger)ip.row];
+		c.textLabel.textColor = [UIColor whiteColor];
+		c.selectionStyle = UITableViewCellSelectionStyleBlue;
+		c.textLabel.text = [[[m objectForKey:@"path"] lastPathComponent] stringByDeletingPathExtension];
+		c.detailTextLabel.text = [m objectForKey:@"note"];
+		return c;
 	}
 	NSArray *list = [self listFor:ip.section];
 	if (![list count]) {
@@ -493,6 +587,7 @@ static UIImage *PDPartIcon(NSString *type) {
 }
 - (void)tableView:(UITableView *)t didSelectRowAtIndexPath:(NSIndexPath *)ip {
 	[t deselectRowAtIndexPath:ip animated:YES];
+	if (ip.section == 1) { if ((NSUInteger)ip.row < [self.handy count] && self.picked) self.picked([[self.handy objectAtIndex:(NSUInteger)ip.row] objectForKey:@"path"]); return; }
 	NSArray *list = [self listFor:ip.section];
 	if ((NSUInteger)ip.row < [list count] && self.picked) self.picked([list objectAtIndex:(NSUInteger)ip.row]);
 }
@@ -619,7 +714,11 @@ static UIImage *PDSwatchImage(PDShape *s) {
 @property (nonatomic, strong) UISegmentedControl *paletteTabs;
 // canvas
 @property (nonatomic, strong) PDDesignView *canvas;
-@property (nonatomic, strong) UISegmentedControl *gizmoControl;   // Slide | Move | Rotate
+@property (nonatomic, strong) UISegmentedControl *gizmoControl;   // Slide | Move | Rotate | Scale
+@property (nonatomic, strong) UILabel *scaleCaption, *scaleHint;  // Scale mode: the % boxes, at the top of the inspector
+@property (nonatomic, strong) UIButton *uniformButton;
+@property (nonatomic, strong) NSArray *scaleRows;                 // PDPercentRow: X, Y, Z (the shape's W, D, H)
+@property (nonatomic, weak) PDShape *scaleEditShape;              // the shape a box was being typed for
 @property (nonatomic, strong) UIButton *resetTurnButton;          // Rotate mode: back onto the shape's own axes
 // inspector
 @property (nonatomic, strong) UIScrollView *inspector;
@@ -760,11 +859,12 @@ static UIImage *PDSwatchImage(PDShape *s) {
 		_canvas.selectionChanged = ^{ weakSelf.selection = weakSelf.canvas.selection; [weakSelf update]; };
 		_canvas.willMove = ^{ [weakSelf remember]; };
 		_canvas.moved = ^(BOOL done) { if (done) [weakSelf changed]; else [weakSelf updateInspectorValues]; };
-		_gizmoControl = [[UISegmentedControl alloc] initWithItems:[NSArray arrayWithObjects:@"Slide", @"Move XYZ", @"Rotate", nil]];
+		_gizmoControl = [[UISegmentedControl alloc] initWithItems:[NSArray arrayWithObjects:@"Slide", @"Move XYZ", @"Rotate", @"Scale", nil]];
 		_gizmoControl.segmentedControlStyle = UISegmentedControlStyleBar;
 		_gizmoControl.tintColor = [UIColor colorWithWhite:0.22 alpha:1];
-		_gizmoControl.selectedSegmentIndex = MAX(0, MIN(2, [ud integerForKey:@"PDDesignGizmo"]));
+		_gizmoControl.selectedSegmentIndex = MAX(0, MIN(3, [ud integerForKey:@"PDDesignGizmo"]));
 		_canvas.gizmo = _gizmoControl.selectedSegmentIndex;
+		_canvas.uniformScale = [ud boolForKey:@"PDDesignUniformScale"];
 		[_gizmoControl addTarget:self action:@selector(gizmoChanged) forControlEvents:UIControlEventValueChanged];
 		_resetTurnButton = PDDButton(@"Reset rotation", PD_ACCENT, 14);
 		_resetTurnButton.backgroundColor = [UIColor colorWithWhite:0 alpha:0.45];
@@ -805,6 +905,7 @@ static UIImage *PDSwatchImage(PDShape *s) {
 		NSArray *sizeNames = [NSArray arrayWithObjects:@"Width", @"Depth", @"Height", nil];
 		NSArray *posNames = [NSArray arrayWithObjects:@"X", @"Y", @"Lift", nil];
 		NSArray *axes = [NSArray arrayWithObjects:@"Z", @"X", @"Y", nil];
+		NSArray *axisLetters = [NSArray arrayWithObjects:@"X", @"Y", @"Z", nil];
 		NSMutableArray *rows = [NSMutableArray array];
 		for (int a = 0; a < 3; a++) {
 			PDValueRow *r = [[PDValueRow alloc] initWithName:[sizeNames objectAtIndex:(NSUInteger)a] minus:@"−" plus:@"+"];
@@ -830,6 +931,22 @@ static UIImage *PDSwatchImage(PDShape *s) {
 			[rows addObject:r];
 		}
 		_turnRows = rows;
+		_scaleCaption = [self caption:@"SCALE (% OF ITS SIZE WHEN PICKED)"];
+		_scaleHint = PDLabel([UIFont systemFontOfSize:12], PD_FAINT);
+		_scaleHint.text = @"Select one shape to scale it.";
+		_uniformButton = PDDButton(@"☐  Uniform", PD_ACCENT, 15);
+		_uniformButton.contentHorizontalAlignment = UIControlContentHorizontalAlignmentLeft;
+		_uniformButton.contentEdgeInsets = UIEdgeInsetsMake(0, 12, 0, 0);
+		[_uniformButton addTarget:self action:@selector(toggleUniform) forControlEvents:UIControlEventTouchUpInside];
+		rows = [NSMutableArray array];
+		for (int a = 0; a < 3; a++) {
+			PDPercentRow *r = [[PDPercentRow alloc] initWithName:[axisLetters objectAtIndex:(NSUInteger)a]];
+			r.step = ^(int dir) { [weakSelf stepScale:a dir:dir]; };
+			r.commit = ^(float v) { if ([[weakSelf selectedShapes] lastObject] == weakSelf.scaleEditShape) [weakSelf setScale:v axis:a]; else [weakSelf updateInspectorValues]; };
+			r.began = ^{ weakSelf.scaleEditShape = [[weakSelf selectedShapes] lastObject]; };
+			[rows addObject:r];
+		}
+		_scaleRows = rows;
 		NSArray *actionTitles = [NSArray arrayWithObjects:@"Duplicate", @"Delete", @"Group", @"Ungroup", @"Mirror…", @"Drop to plate", @"Edit part…", @"Save part…", nil];
 		NSMutableArray *acts = [NSMutableArray array];
 		for (NSUInteger i = 0; i < [actionTitles count]; i++) {
@@ -879,7 +996,8 @@ static UIImage *PDSwatchImage(PDShape *s) {
 		_helpLabel.text = @"Tap a shape on the left to drop it on the plate.\n\nTap a shape to select it; drag it to slide it around. "
 			@"Drag empty space to look around, two fingers to pan, pinch to zoom, double-tap to fit.\n\n"
 			@"Move XYZ shows arrows on the selection: drag one to move along just that axis (up and down too). "
-			@"Rotate shows rings: drag one to turn the selection about its centre (30° snaps inside its pie-slice disc; drag out beyond it for fine 1° steps); Reset rotation squares it back up.\n\n"
+			@"Rotate shows rings: drag one to turn the selection about its centre (30° snaps inside its pie-slice disc; drag out beyond it for fine 1° steps); Reset rotation squares it back up. "
+			@"Scale shows a handle on each of a shape's axes: drag one to stretch it that way, or type the X, Y and Z percentages (0.1–200 %); Uniform keeps its proportions.\n\n"
 			@"Holes cut only when grouped: pick the hole and the shapes it should cut (Pick shapes…, or Select more and tap them), then Group. "
 			@"Align lines selected shapes up; Arrange in a grid lays them out in rows.";
 		_snapCaption = [self caption:@"SNAP GRID"];
@@ -896,6 +1014,7 @@ static UIImage *PDSwatchImage(PDShape *s) {
 			_helpLabel, _snapCaption, _snapControl, _selectAllButton, _fitButton, nil];
 		[ins addObjectsFromArray:_swatches]; [ins addObjectsFromArray:_sizeRows]; [ins addObjectsFromArray:_posRows];
 		[ins addObjectsFromArray:_turnRows]; [ins addObjectsFromArray:_actions];
+		[ins addObjectsFromArray:_scaleRows]; [ins addObjectsFromArray:[NSArray arrayWithObjects:_scaleCaption, _scaleHint, _uniformButton, nil]];
 		[ins addObjectsFromArray:[NSArray arrayWithObjects:_selectMoreButton, _pickButton, _alignCaption, _alignHint, _gridButton, nil]];
 		[ins addObjectsFromArray:_alignLabels]; [ins addObjectsFromArray:_alignButtons]; [ins addObjectsFromArray:_spaceButtons];
 		for (UIView *v in ins) [_inspector addSubview:v];
@@ -957,7 +1076,7 @@ static UIImage *PDSwatchImage(PDShape *s) {
 
 	self.canvas.frame = CGRectMake(g + pw + g, top, W - pw - iw - 4 * g, H - top - g);
 	self.multiButton.frame = CGRectMake(CGRectGetMinX(self.canvas.frame) + 10, top + 10, 120, 34);
-	self.gizmoControl.frame = CGRectMake(CGRectGetMaxX(self.canvas.frame) - 10 - 250, top + 10, 250, 34);
+	self.gizmoControl.frame = CGRectMake(CGRectGetMaxX(self.canvas.frame) - 10 - 320, top + 10, 320, 34);
 	self.resetTurnButton.frame = CGRectMake(CGRectGetMaxX(self.canvas.frame) - 10 - 140, top + 52, 140, 34);
 	self.inspector.frame = CGRectMake(W - g - iw, top, iw, H - top - g);
 	[self layoutInspector];
@@ -975,6 +1094,11 @@ static UIImage *PDSwatchImage(PDShape *s) {
 		for (UIView *v in group) v.hidden = !several;
 	self.gridButton.hidden = !several;
 	self.alignHint.hidden = !any || several;
+	BOOL scaling = any && self.canvas.gizmo == 3, scaleOne = scaling && n == 1;
+	self.scaleCaption.hidden = !scaling;
+	self.scaleHint.hidden = !scaling || scaleOne;
+	self.uniformButton.hidden = !scaleOne;
+	for (UIView *v in self.scaleRows) v.hidden = !scaleOne;
 	for (UIView *v in [NSArray arrayWithObjects:self.helpLabel, self.snapCaption, self.snapControl, self.selectAllButton, self.fitButton, nil]) v.hidden = any;
 	self.insTitle.frame = CGRectMake(x, y, w, 26); y += 28;
 	if (!any) {
@@ -988,6 +1112,15 @@ static UIImage *PDSwatchImage(PDShape *s) {
 		self.snapControl.frame = CGRectMake(x, y, w, 34); y += 46;
 	} else {
 		self.insInfo.frame = CGRectMake(x, y, w, 34); y += 38;
+		if (scaling) {   // Scale mode: its boxes first, where the keyboard doesn't cover them
+			self.scaleCaption.frame = CGRectMake(x, y, w, 14); y += 18;
+			if (!scaleOne) { self.scaleHint.frame = CGRectMake(x, y, w, 16); y += 26; }
+			else {
+				self.uniformButton.frame = CGRectMake(x, y, w, 36); y += 42;
+				for (UIView *r in self.scaleRows) { r.frame = CGRectMake(x, y, w, 36); y += 42; }
+				y += 6;
+			}
+		}
 		// Choosing what to group comes first, then what to do with it.
 		self.selectMoreButton.frame = CGRectMake(x, y, bw, 40);
 		self.pickButton.frame = CGRectMake(x + bw + 8, y, bw, 40); y += 48;
@@ -1128,6 +1261,12 @@ static UIImage *PDSwatchImage(PDShape *s) {
 	self.insInfo.text = [NSString stringWithFormat:@"%.1f × %.1f × %.1f mm%@", bs.x, bs.y, bs.z, off ? @" · off the plate" : lo.z < -0.01f ? @" · below the plate" : @""];
 	self.insInfo.textColor = off || lo.z < -0.01f ? PD_AMBER : PD_DIM;
 	self.turnCaption.text = [NSString stringWithFormat:@"TURN  ·  %@", [PDShape rotationTextFor:sel]];
+	GLKVector3 pct;
+	if ([self.canvas scalePercent:&pct]) for (int a = 0; a < 3; a++) [(PDPercentRow *)[self.scaleRows objectAtIndex:(NSUInteger)a] showValue:pct.v[a]];
+	BOOL u = self.canvas.uniformScale;
+	[self.uniformButton setTitle:u ? @"☑  Uniform (keep proportions)" : @"☐  Uniform" forState:UIControlStateNormal];
+	[self.uniformButton setTitleColor:u ? [UIColor whiteColor] : PD_ACCENT forState:UIControlStateNormal];
+	self.uniformButton.backgroundColor = u ? [PD_ACCENT colorWithAlphaComponent:0.55] : PD_TILE_HI;
 }
 
 #pragma mark Designs
@@ -1557,6 +1696,30 @@ static UIImage *PDSwatchImage(PDShape *s) {
 	[self changed];
 }
 
+// Scale mode's boxes: v % of the shape's base size along axis a (clamped; all three with Uniform). NAN just
+// shows the values again.
+- (void)setScale:(float)v axis:(int)a {
+	GLKVector3 cur;
+	if (isnan(v) || self.busy || ![self.canvas scalePercent:&cur] || fabsf(MAX(0.1f, MIN(200, v)) - cur.v[a]) < 0.05f) { [self updateInspectorValues]; return; }
+	[self remember];
+	[self.canvas setScalePercent:v axis:a];
+	[self changed];
+}
+
+- (void)stepScale:(int)a dir:(int)dir {
+	GLKVector3 cur;
+	if (![self.canvas scalePercent:&cur]) return;
+	float s = cur.v[a] <= 10 && dir < 0 ? 1 : 5, v = dir > 0 ? floorf(cur.v[a] / s + 1e-3f) * s + s : ceilf(cur.v[a] / s - 1e-3f) * s - s;
+	[self setScale:MAX(0.1f, v) axis:a];
+}
+
+- (void)toggleUniform {
+	self.canvas.uniformScale = !self.canvas.uniformScale;
+	[[NSUserDefaults standardUserDefaults] setBool:self.canvas.uniformScale forKey:@"PDDesignUniformScale"];
+	[self updateInspectorValues];
+	[self.canvas redraw];
+}
+
 - (void)cycleTurnStep {
 	self.turnStep = self.turnStep == 15 ? 45 : self.turnStep == 45 ? 90 : self.turnStep == 90 ? 5 : 15;
 	[self update];
@@ -1685,9 +1848,19 @@ static UIImage *PDSwatchImage(PDShape *s) {
 	NSArray *members = [[NSArray alloc] initWithArray:sel copyItems:YES];
 	NSIndexSet *was = self.selection;
 	[self setBusy:YES message:@"Combining shapes…"];
+	self.canvas.progress = 0;
+	__weak PDDesignPage *weakSelf = self;
+	void (^progress)(float, int, int) = ^(float f, int step, int steps) {   // CSG thread -> the bar
+		dispatch_async(dispatch_get_main_queue(), ^{
+			PDDesignPage *me = weakSelf;
+			if (!me.busy) return;
+			me.canvas.message = [NSString stringWithFormat:@"Combining shapes…  step %d of %d  ·  %.0f%%", MAX(1, MIN(step, steps)), steps, f * 100];
+			me.canvas.progress = f;
+		});
+	};
 	dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
 		CFAbsoluteTime t0 = CFAbsoluteTimeGetCurrent();
-		PDShape *g = [PDShape groupOf:members];
+		PDShape *g = [PDShape groupOf:members progress:progress];
 		double took = CFAbsoluteTimeGetCurrent() - t0;
 		dispatch_async(dispatch_get_main_queue(), ^{
 			[self setBusy:NO message:nil];
@@ -1854,6 +2027,7 @@ static NSArray *PDSortedAlong(NSArray *shapes, int axis) {
 }
 
 - (void)gizmoChanged {
+	[self endEditing:YES];
 	self.canvas.gizmo = self.gizmoControl.selectedSegmentIndex;
 	[self update];
 	[[NSUserDefaults standardUserDefaults] setInteger:self.canvas.gizmo forKey:@"PDDesignGizmo"];
