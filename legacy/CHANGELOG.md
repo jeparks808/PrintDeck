@@ -3,6 +3,9 @@
 Each release's .deb is attached to its [GitHub release](https://github.com/jeparks808/PrintDeck/releases). To install
 it on a jailbroken iPad (iOS 5), copy it over, run `dpkg -i` as root, then run `su mobile -c uicache`.
 
+Entries before the move to `legacy/` use the old paths from the repository root (for example `tools/make-profiles.py`
+is now `legacy/tools/make-profiles.py`).
+
 ## Unreleased
 - **Printer touchscreen on the Camera page (COSMOS).** **Touchscreen** shows the printer's own screen, live, beside
   the camera, and taps and drags on it reach the printer. It needs PrintDeck's small mirror service on the printer:
@@ -26,7 +29,7 @@ it on a jailbroken iPad (iOS 5), copy it over, run `dpkg -i` as root, then run `
   probe point, and a dashed line marks the probed footprint. The panel lists the probe count, spacing and X/Y range.
 - The mesh view opens from the front-left, as you stand at the printer. Overlapping parts of the surface are drawn
   far-first, and the demo mesh spans 20–246 mm like a real one.
-- [docs/FEATURES.md](docs/FEATURES.md): what PrintDeck adds over the printer's web page and ElegooSlicer, with
+- [docs/FEATURES.md](../docs/FEATURES.md): what PrintDeck adds over the printer's web page and ElegooSlicer, with
   screenshots.
 
 ## 0.2.0 (23 Nov 2026)

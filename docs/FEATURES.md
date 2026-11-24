@@ -1,7 +1,7 @@
 # What PrintDeck adds
 
 > PrintDeck is a work in progress. This page describes what each feature does, not a guarantee that it works.
-> The [README](../README.md) says which features have been checked on the real printer.
+> The [README](../legacy/README.md) says which features have been checked on the real printer.
 
 The Centauri Carbon comes with two ways to watch and control it away from its touchscreen:
 
@@ -60,9 +60,9 @@ The firmware has no command that returns the mesh.
 - The footer says where the mesh came from and when ("fetched 23 Nov 00:36 · unchanged since last fetch"). The
   page fetches again on its own about 8 s after the printer finishes levelling.
 - **How it gets the mesh:** a tiny helper, `meshbridge`, runs on the printer. It reads the saved Klipper
-  `[bed_mesh]` profiles and serves them on port 7140. `tools/install-meshbridge.sh` installs it so it starts at
+  `[bed_mesh]` profiles and serves them on port 7140. `legacy/tools/install-meshbridge.sh` installs it so it starts at
   every boot (OpenCentauri firmware). You can also paste a mesh, or use a COSMOS printer's Moonraker directly. See
-  [Bed mesh](../README.md#bed-mesh).
+  [Bed mesh](../legacy/README.md#bed-mesh).
 
 ## Main page
 
