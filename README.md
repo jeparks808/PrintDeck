@@ -6,6 +6,10 @@
 > the simulator, and some, such as the print options, are explicitly "not yet checked". Use it at your own risk,
 > and keep an eye on prints started from it.
 
+> **Two apps in this repository.** The top level is the original app for the **iPad 1 (iOS 5.1.1)**, described
+> below. The [`modern/`](modern/) folder is a new SwiftUI app for **current iPhones and iPads** (iOS 17+), being
+> built in stages. Stage 1 (monitor and control over Moonraker) is in progress; see [modern/README.md](modern/README.md).
+
 A live panel, on-device slicer and 3D modeller for an **Elegoo Centauri Carbon** (stock or OpenCentauri firmware, or OpenCentauri **COSMOS** — Klipper +
 Moonraker, detected automatically; see [docs/COSMOS.md](docs/COSMOS.md)) on the iPad 1 (iOS 5.1.1).
 It shows the camera, the current job (thumbnail, %, layer, time left, finish time, and a rotatable **3D view of
