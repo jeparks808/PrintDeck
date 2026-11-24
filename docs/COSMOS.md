@@ -22,12 +22,17 @@ printer (`sim/cosmos_sim.py`), and SDCP still works with the real OpenCentauri p
      - `config-files.tar.gz`: `/board-resource` (including `user_printer.cfg` with your bed meshes and calibration), `/user-resource` (CANVAS `filament_info`) and `/etc`.
      - With `--full`, a gzip image of every eMMC partition. This is the last-resort restore over UART/FEL.
    - Without `--full` it takes a minute. With it, expect a long run over Wi-Fi.
+     - `--full` also copies the first 32 MB of the eMMC (the partition table and the bootloader, which no named partition holds).
+   - Add `--wait-idle` to start it while the printer is busy (e.g. bed levelling). It asks for the password first,
+     then waits until the printer is idle, plus 20 s, before copying.
 2. **Keep the OpenCentauri firmware image.** It is already saved and checksummed:
    - `~/printer-backups/opencentauri-firmware/update.swu`
    - sha256 `f5eb6db1…d369`, built from Elegoo `FW-CentauriCarbon-v1.4.49`.
    - Its only other copy was in a temporary folder.
 3. **Keep the USB stick from the install.** The COSMOS installer writes `ELEGOO.txt` to it, and you need that file to get back to stock Elegoo.
 4. **Write down what you'd hate to lose**: Wi-Fi settings, Z offset, and the CANVAS slot colours (the dashboard shows them).
+   - **Lifetime print time:** nothing to do. COSMOS keeps Elegoo's counter file, and PrintDeck reads it from the
+     printer and adds COSMOS's own print time. See [Lifetime print time](../README.md#lifetime-print-time).
 5. **Change the root password.** COSMOS has dropbear SSH. OpenCentauri's default password and its open shell on port 4567 are a risk on any Wi-Fi.
 
 ### Install (offline method, so you know exactly which image goes on)

@@ -109,4 +109,13 @@ typedef enum {
 - (void)adjustZOffset:(double)mm;    // SET_GCODE_OFFSET Z_ADJUST= (MOVE=1 while printing)
 - (void)motorsOff;                   // M84
 - (void)firmwareRestart;             // FIRMWARE_RESTART, after a Klipper shutdown
+
+// Lifetime print time. Elegoo's firmware (stock and OpenCentauri patched) counts every print's time in
+// /board-resource/sysconf.cfg (`cumulative_time`, seconds; Settings > About shows it as "1007h27m"), and COSMOS
+// starts its own count at zero. COSMOS leaves that file in place and Moonraker serves it, so on COSMOS it is read
+// from the printer (earlierPrintTime, remembered on the iPad) and Klipper's own total (Moonraker's job totals) is
+// added to it. Not editable: both numbers come from the printer.
+@property (nonatomic, readonly) double cosmosPrintTime;   // seconds, total_print_time; -1 until known (or not COSMOS)
++ (double)earlierPrintTime;                                 // seconds, 0 until read from a COSMOS printer
+- (double)lifetimePrintTime;                                // earlier + cosmosPrintTime; -1 when neither is known
 @end

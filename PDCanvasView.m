@@ -110,9 +110,12 @@ static void PDText(NSString *t, CGRect r, UIFont *f, UIColor *c, NSTextAlignment
 		int tid = PDNum(t, @"tray_id") ? [PDNum(t, @"tray_id") intValue] : (int)i;
 		BOOL empty = [PDNum(t, @"status") intValue] == 0, on = tid == active;
 		UIColor *col = PDColorFromHex(PDStr(t, @"filament_color"));
-		NSString *type = [PDStr(t, @"filament_type") length] ? PDStr(t, @"filament_type") : @"—";
+		// Filament sensed but no material recorded (COSMOS before anyone sets the lane): say so instead of a bare dash.
+		BOOL known = [PDStr(t, @"filament_type") length] > 0;
+		NSString *type = known ? PDStr(t, @"filament_type") : @"Loaded";
 		NSString *name = PDStr(t, @"filament_name") ?: @"", *brand = PDStr(t, @"brand") ?: @"";
-		NSString *full = [name length] && ![name isEqualToString:type] ? [NSString stringWithFormat:@"%@ %@", brand, name] : brand;
+		NSString *full = [name length] && ![name isEqualToString:type] ? [[NSString stringWithFormat:@"%@ %@", brand, name] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]] : brand;
+		if (!known && ![full length]) full = @"material not set";
 		if (!self.large) {
 			// card: one row per slot
 			CGFloat rh = b.size.height / n, y = i * rh, r = MIN(15, rh / 2 - 6);
@@ -139,7 +142,8 @@ static void PDText(NSString *t, CGRect r, UIFont *f, UIColor *c, NSTextAlignment
 			if (!empty) {
 				PDText(full, CGRectMake(x + 8, y, tw - 16, 20), [UIFont systemFontOfSize:16], PD_DIM, NSTextAlignmentCenter); y += 24;
 				NSString *hex = [[PDStr(t, @"filament_color") ?: @"" uppercaseString] stringByReplacingOccurrencesOfString:@"#" withString:@""];
-				PDText([NSString stringWithFormat:@"#%@", hex], CGRectMake(x + 8, y, tw - 16, 18), [UIFont systemFontOfSize:14], PD_FAINT, NSTextAlignmentCenter); y += 26;
+				if ([hex length]) PDText([NSString stringWithFormat:@"#%@", hex], CGRectMake(x + 8, y, tw - 16, 18), [UIFont systemFontOfSize:14], PD_FAINT, NSTextAlignmentCenter);
+				y += 26;
 				int lo = [PDNum(t, @"min_nozzle_temp") intValue], hi = [PDNum(t, @"max_nozzle_temp") intValue];
 				if (lo > 0 || hi > 0) PDText([NSString stringWithFormat:@"Nozzle %d–%d °C", lo, hi], CGRectMake(x + 8, y, tw - 16, 20), [UIFont systemFontOfSize:15], PD_DIM, NSTextAlignmentCenter);
 				y += 26;

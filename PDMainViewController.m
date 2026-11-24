@@ -36,6 +36,7 @@ static const int PDSpeeds[] = {50, 100, 130, 160};
 @property (nonatomic, strong) PDCard *jobCard;
 @property (nonatomic, strong) UIImageView *thumb;
 @property (nonatomic, strong) UILabel *jobName, *percentLabel, *layerLabel, *elapsedLabel, *remainLabel, *doneAtLabel, *jobHint;
+@property (nonatomic, strong) UILabel *lifetimeLabel;   // in the card's title row, right-aligned, while no job runs
 @property (nonatomic, strong) PDProgressBar *bar;
 @property (nonatomic, strong) UIButton *pauseButton, *stopButton;
 @property (nonatomic, strong) PDFilesCard *filesCard;
@@ -137,9 +138,11 @@ static const int PDSpeeds[] = {50, 100, 130, 160};
 	self.remainLabel = PDLabel(PDLightFont(34), [UIColor whiteColor]);
 	self.doneAtLabel = PDLabel([UIFont systemFontOfSize:17], PD_DIM);
 	self.jobHint = PDLabel([UIFont systemFontOfSize:14], PD_FAINT);
+	self.lifetimeLabel = PDLabel([UIFont systemFontOfSize:13], PD_DIM);
+	self.lifetimeLabel.textAlignment = NSTextAlignmentRight;
 	self.bar = [[PDProgressBar alloc] initWithFrame:CGRectZero];
 	for (UIView *s in [NSArray arrayWithObjects:self.thumb, self.jobName, self.percentLabel, self.layerLabel, self.elapsedLabel,
-			self.remainLabel, self.doneAtLabel, self.jobHint, self.bar, nil]) [self.jobCard addSubview:s];
+			self.remainLabel, self.doneAtLabel, self.jobHint, self.lifetimeLabel, self.bar, nil]) [self.jobCard addSubview:s];
 	self.pauseButton = PDButton(@"Pause", PD_AMBER);
 	[self.pauseButton addTarget:self action:@selector(pauseResume) forControlEvents:UIControlEventTouchUpInside];
 	self.stopButton = PDButton(@"Stop", PD_RED);
@@ -344,6 +347,7 @@ static const int PDSpeeds[] = {50, 100, 130, 160};
 	self.elapsedLabel.frame = CGRectMake(tx + tw * 0.5, bottom - 18, tw * 0.5, 18);
 	self.elapsedLabel.textAlignment = NSTextAlignmentRight;
 	self.percentLabel.frame = CGRectMake(rx, y + 10, rw, 46);
+	self.lifetimeLabel.frame = CGRectMake(x + 100, y, c.size.width - 100, 16);
 }
 
 #pragma mark - Updating
@@ -740,6 +744,7 @@ static const int PDSpeeds[] = {50, 100, 130, 160};
 		if ([self.remainLabel.text length] && js != PDJobComplete && js != PDJobStopped) [bits addObject:self.remainLabel.text];
 		if ([self.doneAtLabel.text length]) [bits addObject:self.doneAtLabel.text];
 		self.jobHint.text = [bits componentsJoinedByString:@" · "];
+		self.lifetimeLabel.text = @"";
 		self.bar.hidden = NO;
 	} else {
 		self.percentLabel.text = @"";
@@ -761,6 +766,8 @@ static const int PDSpeeds[] = {50, 100, 130, 160};
 			self.layerLabel.text = @"";
 			self.elapsedLabel.text = @"";
 		}
+		double life = p.lifetimePrintTime;
+		self.lifetimeLabel.text = life >= 0 ? [NSString stringWithFormat:@"Lifetime %@", PDDuration(life)] : @"";
 	}
 	[self loadThumb:taskMatches ? PDStr(task, @"Thumbnail") : nil];
 }
@@ -989,6 +996,8 @@ static const int PDSpeeds[] = {50, 100, 130, 160};
 		NSLog(@"PrintDeck: cleared the local cache");
 	});
 }
+
+#pragma mark Custom temperature
 
 - (void)promptCustomTemp:(int)which {
 	self.customTempFor = which;

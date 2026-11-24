@@ -2,7 +2,10 @@
 # Back up an OpenCentauri (patched) Centauri Carbon before trying COSMOS.
 # Read-only on the printer: it only runs cat/ls/tar/dd *from* the printer to this computer.
 #
-#   tools/backup-printer.sh [printer-ip] [--full]
+#   tools/backup-printer.sh [printer-ip] [--full] [--wait-idle]
+#
+# --wait-idle: ask for the password first, then wait until the printer is idle (no print, no bed levelling or
+# other touchscreen job, read over SDCP), plus 20 seconds, before copying anything. Start it during levelling.
 #
 # Default: system info + every config/calibration file (/board-resource, /user-resource, /etc, ...).
 # --full also images every eMMC partition (dd over SSH, gzip here). That takes a while (several GB
@@ -14,9 +17,11 @@ set -euo pipefail
 
 IP=192.168.0.185
 FULL=0
+WAIT=0
 for a in "$@"; do
 	case "$a" in
 		--full) FULL=1 ;;
+		--wait-idle) WAIT=1 ;;
 		*) IP="$a" ;;
 	esac
 done
@@ -24,13 +29,47 @@ done
 OUT="$HOME/printer-backups/$IP-$(date +%Y%m%d-%H%M%S)"
 mkdir -p "$OUT"
 SOCK="$OUT/.ssh-ctl"
-SSH=(ssh -o ControlMaster=auto -o ControlPath="$SOCK" -o ControlPersist=600
+SSH=(ssh -o ControlMaster=auto -o ControlPath="$SOCK" -o ControlPersist=yes -o ServerAliveInterval=30
      -o StrictHostKeyChecking=accept-new -o ConnectTimeout=8 "root@$IP")
 cleanup() { ssh -o ControlPath="$SOCK" -O exit "root@$IP" 2>/dev/null || true; rm -f "$SOCK"; }
 trap cleanup EXIT
 
 echo "== Backing up $IP into $OUT"
 "${SSH[@]}" true    # the one password prompt; later commands reuse this connection
+
+if [ "$WAIT" = 1 ]; then
+	echo "== Waiting for the printer to be idle (Ctrl-C to give up)"
+	# Read-only SDCP status (Cmd 0). Idle = CurrentStatus all 0 and PrintInfo.Status 0, seen twice in a row.
+	python3 -I - "$IP" <<'PY'
+import asyncio, json, sys, time, uuid
+import websockets
+ip = sys.argv[1]
+async def status():
+    async with websockets.connect(f"ws://{ip}:3030/websocket", max_size=None, open_timeout=10) as ws:
+        await ws.send(json.dumps({"Id": "", "Data": {"Cmd": 0, "Data": {}, "RequestID": uuid.uuid4().hex,
+                                  "MainboardID": "", "TimeStamp": 0, "From": 1}}))
+        end = time.time() + 8
+        while time.time() < end:
+            try: j = json.loads(await asyncio.wait_for(ws.recv(), 2))
+            except asyncio.TimeoutError: continue
+            if isinstance(j.get("Status"), dict): return j["Status"]
+idle_seen, last = 0, None
+while idle_seen < 2:
+    try:
+        s = asyncio.run(status()); msg = "no status reply"
+    except Exception as e:
+        s = None; msg = f"no answer ({e.__class__.__name__})"
+    if s:
+        cs = s.get("CurrentStatus") or [0]; ps = (s.get("PrintInfo") or {}).get("Status", 0)
+        idle = all(c == 0 for c in cs) and ps == 0
+        msg = "idle" if idle else f"busy (CurrentStatus {cs}, PrintInfo.Status {ps})"
+        idle_seen = idle_seen + 1 if idle else 0
+    if msg != last: print(time.strftime("   %H:%M:%S"), msg, flush=True); last = msg
+    if idle_seen < 2: time.sleep(10)
+PY
+	echo "   idle; waiting 20 s more"
+	sleep 20
+fi
 
 echo "== System info"
 "${SSH[@]}" 'sh -s' >"$OUT/system-info.txt" 2>&1 <<'EOF' || true
@@ -66,6 +105,10 @@ if [ "$FULL" = 1 ]; then
 		echo "   $part"
 		"${SSH[@]}" "dd if=/dev/by-name/$part bs=1M 2>/dev/null" | gzip -1 >"$OUT/partitions/$part.img.gz"
 	done
+	# The ~20 MB before the first partition holds the partition table and Allwinner's boot0/U-Boot, which no
+	# by-name partition covers. A UART/FEL restore needs it.
+	echo "   mmcblk0 start (partition table + bootloader)"
+	"${SSH[@]}" "dd if=/dev/mmcblk0 bs=1M count=32 2>/dev/null" | gzip -1 >"$OUT/partitions/mmcblk0-first32M.img.gz"
 fi
 
 echo "== Checksums"

@@ -37,7 +37,8 @@ brightened, and all are cached in `Library/Caches/PrintDeckThumbs`. See [3D tool
 **Every card opens a full-screen detail page** — ‹ PrintDeck (top left) or a swipe to the right goes back:
 - **Nozzle / bed / chamber**: a big reading, a large smooth graph with min/max/avg over the last minute, and
   quick temperature presets. The **Bed** page also has a **Bed mesh** button (see [Bed mesh](#bed-mesh)).
-- **Camera**: a large live feed, fps, pause.
+- **Camera**: a large live feed, fps, pause. On COSMOS, **Touchscreen** puts the printer's own touchscreen, live and
+  pressable, beside it (see [Printer touchscreen](#printer-touchscreen-cosmos)).
 - **CANVAS** (`printdeck://page?name=canvas`): a big tile per slot (spool in its colour, type, brand, hex
   colour, nozzle range, "FEEDING THE NOZZLE" on the active one) plus connected / feeding / auto-refill / loaded
   tiles. Read-only: see [SDCP commands used](#sdcp-commands-used) for why slots are set on the printer's screen.
@@ -352,12 +353,76 @@ live on the persistent `/user-resource` partition, so they survive reboots and f
   **Print** (asks first; disabled while busy). Move / Home also lists them (tap to print).
 - **Move / Home**: live camera; jog each axis with its own step size, home one axis or all, preheat/cool down;
   disabled while a job runs (see [Move / Home](#move--home)).
-- **••• menu**: camera on/off (saves Wi-Fi and CPU), find printer, enter an address, reconnect, Bed mesh, and
-  **Clear local cache…** (thumbnails, parsed toolpaths unless a job is running, slicer scratch files, and the
+- **••• menu**: camera on/off (saves Wi-Fi and CPU), find printer, enter an address, reconnect, Bed mesh,
+  and **Clear local cache…** (thumbnails, parsed toolpaths unless a job is running, slicer scratch files, and the
   Design page's in-memory part and model caches).
 - **3D previews while printing**: the printer's web server answers every file download with HTTP 500 "device
   busy" while a job is being prepared or printed, so a file that isn't cached yet shows a note saying so and
   loads by itself once the printer allows it (PrintDeck retries every 20 s).
+
+## Printer touchscreen (COSMOS)
+
+On COSMOS, the Camera page's **Touchscreen** button shows the printer's own touchscreen beside the camera, at about
+its real size. It's live, and you can tap and drag on it as you would on the printer, so anything the printer's
+screen can do (its Tools, Network and Settings pages, the CANVAS screens, prompts) works from the iPad while you
+watch the camera.
+
+It needs a small service on the printer, which COSMOS doesn't ship:
+[tools/screen-mirror/printdeck-screen.py](tools/screen-mirror/printdeck-screen.py) (Python standard library only,
+port 8091). Install it over SSH:
+```bash
+tools/screen-mirror/install.sh <printer-ip>
+```
+- The script goes in `/data/printdeck`, with a startup script in `/etc/init.d`. Both survive reboots.
+- To remove it: `tools/screen-mirror/install.sh <printer-ip> --remove`.
+
+How it works:
+- **Screen:** the touchscreen app draws on the printer's 480 × 272 framebuffer (`/dev/fb0`). The service sends it
+  as PNG (about 10 KB), and only when it changes: PrintDeck asks with the last frame's tag, and the service holds
+  the request until the screen differs, for up to 4 s. A still screen costs nothing.
+- **Touch:** taps and drags are written into the touch panel's own input device (`/dev/input/event0`). The
+  touchscreen app reads that device directly, so it can't tell them from a finger. Panel coordinates are screen
+  pixels.
+- **When the printer's screen saver is on,** the mirror shows a dark screen. A tap wakes it, as on the printer.
+- **No login,** like Moonraker on port 80: anyone on the printer's network can see and press the screen. Remove it
+  if that matters on your network.
+
+## Lifetime print time
+
+The job card's title row shows **Lifetime 1007h 27m** (for example) while no job is running.
+
+**Where the number comes from.** Elegoo's firmware (stock, and OpenCentauri patched) counts every print's time,
+from the very first print, in `/board-resource/sysconf.cfg`:
+```
+cumulative_time : 3626837
+```
+The value is in **seconds**. The touchscreen's device information page (in Settings) shows it as hours and
+minutes, e.g. `1007h27m`. The firmware adds each print's time when the print ends.
+- `/board-resource` isn't replaced by firmware updates, so the counter survives them, even updates that wipe the job history.
+- Elegoo's network APIs (SDCP, the web UI) don't report it.
+- **COSMOS keeps the file but doesn't add to it:** Klipper/Moonraker keeps its own total, which starts at zero.
+
+**What PrintDeck shows.** Nothing is typed in; it can't be edited.
+- **On COSMOS:** Moonraker serves `/board-resource` as its `logs` folder, so PrintDeck reads `cumulative_time` from
+  `http://<printer-ip>/server/files/logs/sysconf.cfg` when it connects, and adds Klipper's own print time to it
+  (Moonraker's `server.history.totals` → `total_print_time`, refreshed after every job). The touchscreen's
+  Settings → About shows the same total when it runs the grumpyscreen build with the lifetime line.
+- **On Elegoo / OpenCentauri firmware:** the last stock total PrintDeck read from a COSMOS printer, remembered on the
+  iPad. It shows nothing if PrintDeck has never been connected to the printer on COSMOS; the printer's own screen
+  has the live count.
+
+**Reading the total yourself**, on any computer:
+- **Touchscreen** (any firmware): Settings → device information (Elegoo) or Settings → About (COSMOS with the patched screen).
+- **Over SSH** (see [Logging in over SSH](#logging-in-over-ssh)). This prints it as hours and minutes:
+  ```bash
+  ssh root@<printer-ip> "awk -F' : ' '/^cumulative_time/ {printf \"%dh%02dm\\n\", \$2/3600, \$2%3600/60}' /board-resource/sysconf.cfg"
+  ```
+- **From a backup** made with `tools/backup-printer.sh`:
+  ```bash
+  tar -xzOf ~/printer-backups/<ip>-<date>/config-files.tar.gz board-resource/sysconf.cfg | grep cumulative_time
+  ```
+
+Writing the total into COSMOS's own history (so Mainsail shows it too) isn't done yet.
 
 ## SDCP commands used
 From [OpenCentauri's API notes](https://docs.opencentauri.cc/software/api) and the printer's own web UI (port 80),

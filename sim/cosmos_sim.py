@@ -570,7 +570,7 @@ RPC = {"server.info": "/server/info", "printer.info": "/printer/info", "printer.
        "printer.emergency_stop": "/printer/emergency_stop", "printer.firmware_restart": "/printer/firmware_restart",
        "server.files.list": "/server/files/list", "server.files.metadata": "/server/files/metadata",
        "server.files.get_directory": "/server/files/get_directory", "server.files.delete_file": "/server/files/delete_file",
-       "server.history.list": "/server/history/list", "server.temperature_store": "/server/temperature_store",
+       "server.history.list": "/server/history/list", "server.history.totals": "/server/history/totals", "server.temperature_store": "/server/temperature_store",
        "server.gcode_store": "/server/gcode_store", "server.webcams.list": "/server/webcams/list", "machine.system_info": "/machine/system_info"}
 
 def ws_frame(payload, op=1):
