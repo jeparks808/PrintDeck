@@ -97,9 +97,26 @@ public struct FileMetadata: Sendable, Equatable {
     public var layerCount: Int?
     public var objectHeight: Double?
     public var slicer: String?
+    public var nozzleDiameter: Double?
+    public var layerHeight: Double?
+    public var firstLayerNozzle: Double?
+    public var firstLayerBed: Double?
+    /// One entry per filament the file uses (CANVAS slot / tool): colour as "#RRGGBB", type, name.
+    public var filaments: [Filament] = []
     /// Thumbnail paths relative to the gcodes root, largest last.
     public var thumbnails: [String] = []
     public init() {}
+}
+
+public struct Filament: Sendable, Equatable, Hashable {
+    public var color: String?
+    public var type: String?
+    public var name: String?
+    public init(color: String?, type: String?, name: String?) {
+        self.color = color
+        self.type = type
+        self.name = name
+    }
 }
 
 /// Time left, blending the slicer's estimate with an extrapolation from progress. Slicer estimates can be far off

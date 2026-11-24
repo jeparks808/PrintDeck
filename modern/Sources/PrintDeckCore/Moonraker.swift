@@ -203,10 +203,15 @@ public struct MoonrakerClient: Sendable {
         }.sorted { $0.modified > $1.modified }
     }
 
-    /// The slicer details of a file. Throws when Moonraker hasn't scanned the file yet (HTTP 404).
+    /// The slicer details of a file. Moonraker only reads files it has been told about, so when it doesn't know this
+    /// one yet (HTTP 404) it is asked to scan it now (`metascan`), which can take a few seconds for a big file.
     public func metadata(for path: String) async throws -> FileMetadata {
-        let r = J.dict(try await call("GET", "/server/files/metadata", [URLQueryItem(name: "filename", value: path)]))
-        return Self.metadata(from: r ?? [:])
+        let q = [URLQueryItem(name: "filename", value: path)]
+        do {
+            return Self.metadata(from: J.dict(try await call("GET", "/server/files/metadata", q)) ?? [:])
+        } catch PrinterError.http(404, _) {
+            return Self.metadata(from: J.dict(try await call("POST", "/server/files/metascan", q, timeout: 60)) ?? [:])
+        }
     }
 
     public static func metadata(from r: [String: Any]) -> FileMetadata {
@@ -216,6 +221,25 @@ public struct MoonrakerClient: Sendable {
         m.layerCount = J.int(r, "layer_count")
         m.objectHeight = J.double(r, "object_height")
         m.slicer = J.string(r, "slicer")
+        m.nozzleDiameter = J.double(r, "nozzle_diameter")
+        m.layerHeight = J.double(r, "layer_height")
+        m.firstLayerNozzle = J.double(r, "first_layer_extr_temp")
+        m.firstLayerBed = J.double(r, "first_layer_bed_temp")
+        // Colours come as a list; types and names as lists or as a JSON string of a list (ElegooSlicer).
+        func list(_ k: String) -> [String] {
+            if let a = J.array(r, k) as? [String] { return a }
+            if let s = J.string(r, k) {
+                if let d = s.data(using: .utf8), let a = (try? J.parse(d)) as? [String] { return a }
+                return s.split(separator: ";").map { $0.trimmingCharacters(in: .whitespaces) }
+            }
+            return []
+        }
+        let colors = list("filament_colors"), types = list("filament_type"), names = list("filament_name")
+        let n = max(colors.count, types.count, names.count)
+        m.filaments = (0..<n).map { i in
+            Filament(color: i < colors.count ? colors[i] : nil, type: i < types.count ? types[i] : nil,
+                     name: i < names.count ? names[i] : nil)
+        }
         let thumbs = (J.array(r, "thumbnails") ?? []).compactMap { J.dict($0) }
             .sorted { (J.double($0, "width") ?? 0) < (J.double($1, "width") ?? 0) }
         m.thumbnails = thumbs.compactMap { J.string($0, "relative_path") }

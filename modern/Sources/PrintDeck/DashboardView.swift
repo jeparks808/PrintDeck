@@ -31,13 +31,20 @@ struct DashboardView: View {
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) { StatePill(state: store.state, connected: store.connected) }
                 ToolbarItemGroup(placement: .topBarTrailing) {
-                    NavigationLink { FilesView() } label: { Label("Files", systemImage: "folder") }
+                    NavigationLink(value: Route.files) { Label("Files", systemImage: "folder") }
                     Menu {
                         Button("Change printer…", systemImage: "printer") { showConnect = true }
                     } label: { Label("More", systemImage: "ellipsis.circle") }
                 }
             }
             .refreshable { await store.refreshFiles() }
+            // Every screen is pushed from here, by value: one tap pushes exactly one screen.
+            .navigationDestination(for: Route.self) { route in
+                switch route {
+                case .files: FilesView()
+                }
+            }
+            .navigationDestination(for: PrintFile.self) { FileDetailView(file: $0) }
             .sheet(isPresented: $showConnect) { ConnectView(onDone: { showConnect = false }) }
             .alert("The printer refused that", isPresented: Binding(get: { store.actionError != nil },
                                                                set: { if !$0 { store.actionError = nil } })) {
@@ -45,6 +52,10 @@ struct DashboardView: View {
             } message: { Text(store.actionError ?? "") }
         }
     }
+}
+
+enum Route: Hashable {
+    case files
 }
 
 struct ConnectingBanner: View {
@@ -232,6 +243,7 @@ struct TemperatureCard: View {
                     }
                 }
             }
+            .chartYScale(domain: tempDomain)
             .chartXAxis { AxisMarks(values: .stride(by: .minute, count: 2)) { _ in AxisGridLine(); AxisValueLabel(format: .dateTime.hour().minute()) } }
             .chartYAxis { AxisMarks(position: .leading) }
             .frame(height: 150)
@@ -239,6 +251,16 @@ struct TemperatureCard: View {
                 .font(.caption2).foregroundStyle(.tertiary)
         }
         .sheet(item: $editing) { kind in TargetSheet(kind: kind).presentationDetents([.medium]) }
+    }
+
+    /// Zoom the graph to the readings (and targets), with a little room above and below.
+    private var tempDomain: ClosedRange<Double> {
+        var values = store.history.flatMap { [$0.nozzle, $0.bed, $0.chamber].compactMap { $0 } }
+        if let t = store.snapshot?.nozzle?.target, t > 0 { values.append(t) }
+        if let t = store.snapshot?.bed?.target, t > 0 { values.append(t) }
+        guard let lo = values.min(), let hi = values.max() else { return 0...50 }
+        let pad = max(3, (hi - lo) * 0.1)
+        return floor((lo - pad) / 5) * 5 ... ceil((hi + pad) / 5) * 5
     }
 }
 

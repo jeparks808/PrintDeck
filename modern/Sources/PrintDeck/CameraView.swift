@@ -94,7 +94,7 @@ struct CameraView: View {
     @State private var player = MJPEGPlayer()
 
     var body: some View {
-        ZStack(alignment: .bottomTrailing) {
+        ZStack {
             Rectangle().fill(.black)
             if let img = player.image {
                 Image(uiImage: img).resizable().scaledToFit()
@@ -107,6 +107,8 @@ struct CameraView: View {
                 }
                 .foregroundStyle(.secondary)
             }
+        }
+        .overlay(alignment: .bottomTrailing) {
             if showsFPS, player.image != nil {
                 Text(String(format: "%.0f fps", player.fps))
                     .font(.caption2.monospacedDigit())
@@ -116,7 +118,8 @@ struct CameraView: View {
                     .padding(6)
             }
         }
-        .aspectRatio(4 / 3, contentMode: .fit)
+        // The box takes the stream's own shape once the first frame arrives (4:3 until then).
+        .aspectRatio(player.image.map { $0.size.width / max(1, $0.size.height) } ?? 4 / 3, contentMode: .fit)
         .onAppear { player.play(url) }
         .onChange(of: url) { _, new in player.play(new) }
         .onDisappear { player.stop() }

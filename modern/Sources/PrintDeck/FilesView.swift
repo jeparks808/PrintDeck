@@ -25,10 +25,19 @@ struct FilesView: View {
             }
         }
         .navigationTitle("Files (\(store.files.count))")
-        .navigationDestination(for: PrintFile.self) { FileDetailView(file: $0) }
         .searchable(text: $search)
         .refreshable { await store.refreshFiles() }
         .task { if store.files.isEmpty { await store.refreshFiles() } }
+    }
+}
+
+extension Color {
+    /// "#RRGGBB" → Color.
+    init?(hex: String?) {
+        guard var s = hex?.trimmingCharacters(in: .whitespaces), !s.isEmpty else { return nil }
+        if s.hasPrefix("#") { s.removeFirst() }
+        guard s.count >= 6, let v = UInt32(s.prefix(6), radix: 16) else { return nil }
+        self.init(red: Double((v >> 16) & 0xFF) / 255, green: Double((v >> 8) & 0xFF) / 255, blue: Double(v & 0xFF) / 255)
     }
 }
 
@@ -55,11 +64,33 @@ struct FileDetailView: View {
                 if let w = m?.filamentWeight { LabeledContent("Filament", value: String(format: "%.1f g", w)) }
                 if let l = m?.layerCount { LabeledContent("Layers", value: "\(l)") }
                 if let h = m?.objectHeight { LabeledContent("Height", value: String(format: "%.1f mm", h)) }
+                if let n = m?.nozzleDiameter { LabeledContent("Nozzle", value: String(format: "%.1f mm", n)) }
+                if let h = m?.layerHeight { LabeledContent("Layer height", value: String(format: "%.2f mm", h)) }
+                if let t = m?.firstLayerNozzle, let b = m?.firstLayerBed {
+                    LabeledContent("First layer", value: String(format: "%.0f° nozzle · %.0f° bed", t, b))
+                }
                 if let s = m?.slicer { LabeledContent("Slicer", value: s) }
                 LabeledContent("Size", value: ByteCountFormatter.string(fromByteCount: file.size, countStyle: .file))
                 LabeledContent("Uploaded", value: file.modified.formatted(date: .abbreviated, time: .shortened))
                 if m == nil {
-                    Text("The printer hasn't read this file's slicer details yet.").font(.caption).foregroundStyle(.secondary)
+                    HStack(spacing: 8) {
+                        ProgressView()
+                        Text("Asking the printer to read this file…").font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+            }
+            if let filaments = m?.filaments, !filaments.isEmpty {
+                Section("Filament") {
+                    ForEach(Array(filaments.enumerated()), id: \.offset) { i, f in
+                        HStack(spacing: 10) {
+                            Circle().fill(Color(hex: f.color) ?? .gray).frame(width: 18, height: 18)
+                                .overlay(Circle().stroke(.white.opacity(0.3)))
+                            Text(filaments.count > 1 ? "\(i + 1)" : "").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                            Text(f.name ?? f.type ?? "Filament").lineLimit(1)
+                            Spacer()
+                            if let t = f.type { Text(t).foregroundStyle(.secondary) }
+                        }
+                    }
                 }
             }
             Section {

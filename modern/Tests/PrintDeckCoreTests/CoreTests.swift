@@ -99,3 +99,14 @@ func fixture(_ name: String) throws -> Any {
     }
     #expect(frames == [Data(frame1), Data(frame2)])
 }
+
+@Test func elegooMetadata() throws {
+    let m = MoonrakerClient.metadata(from: J.dict(try fixture("metadata-elegoo"))!)
+    #expect(m.estimatedTime == 8306)
+    #expect(m.layerCount == 291)
+    #expect(m.layerHeight == 0.24 && m.nozzleDiameter == 0.6)
+    #expect(m.firstLayerNozzle == 220 && m.firstLayerBed == 60)
+    #expect(m.filaments.count == 4)
+    #expect(m.filaments[1] == Filament(color: "#FFFF00", type: "PLA", name: "SUNLU PLA @System - Yellow"))
+    #expect(m.thumbnails.last == ".thumbs/part-144x144.png")   // largest last
+}
