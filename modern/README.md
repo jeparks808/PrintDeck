@@ -1,8 +1,8 @@
 # PrintDeck for current iPhones and iPads
 
 > **Work in progress: stage 1 (monitor and control).** A new SwiftUI app for iOS / iPadOS 17 and later. It's built on
-> **Linux** with [xtool](https://github.com/xtool-org/xtool); no Mac is needed. The iPad 1 app in the repository root is
-> separate and unchanged.
+> **Linux** with [xtool](https://github.com/xtool-org/xtool); no Mac is needed. The iPad 1 app in
+> [`legacy/`](../legacy/README.md) is separate and unchanged.
 
 It talks to Klipper printers through **Moonraker**, such as the Centauri Carbon running OpenCentauri **COSMOS**.
 Support for Elegoo's SDCP protocol (stock and OpenCentauri patched firmware) is planned.

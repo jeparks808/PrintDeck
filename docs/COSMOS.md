@@ -32,7 +32,7 @@ printer (`sim/cosmos_sim.py`), and SDCP still works with the real OpenCentauri p
 3. **Keep the USB stick from the install.** The COSMOS installer writes `ELEGOO.txt` to it, and you need that file to get back to stock Elegoo.
 4. **Write down what you'd hate to lose**: Wi-Fi settings, Z offset, and the CANVAS slot colours (the dashboard shows them).
    - **Lifetime print time:** nothing to do. COSMOS keeps Elegoo's counter file, and PrintDeck reads it from the
-     printer and adds COSMOS's own print time. See [Lifetime print time](../README.md#lifetime-print-time).
+     printer and adds COSMOS's own print time. See [Lifetime print time](../legacy/README.md#lifetime-print-time).
 5. **Change the root password.** COSMOS has dropbear SSH. OpenCentauri's default password and its open shell on port 4567 are a risk on any Wi-Fi.
 
 ### Install (offline method, so you know exactly which image goes on)
