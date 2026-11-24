@@ -1,4 +1,5 @@
 #import "PDCardPage.h"
+#import "PDScreenMirrorView.h"
 #import "PDPrinter.h"
 #import "PDViews.h"
 #import "PDMJPEGView.h"
@@ -39,8 +40,9 @@ static UILabel *PDPL(UIFont *f, UIColor *c, NSTextAlignment a) {
 // camera
 @property (nonatomic, strong) PDMJPEGView *camera;
 @property (nonatomic, strong) UILabel *fpsLabel, *camNote;
-@property (nonatomic, strong) UIButton *camToggle;
-@property (nonatomic, assign) BOOL camOn;
+@property (nonatomic, strong) UIButton *camToggle, *screenToggle;
+@property (nonatomic, assign) BOOL camOn, screenOn, mirrorLaidOut;
+@property (nonatomic, strong) PDScreenMirrorView *mirror;   // COSMOS: the printer's touchscreen, beside the camera
 // job
 @property (nonatomic, strong) UIImageView *thumb;
 @property (nonatomic, strong) UILabel *jobName, *percentLabel, *layerLabel, *elapsedLabel, *remainLabel, *doneAtLabel, *speedLabel, *jobState;
@@ -152,6 +154,7 @@ static UILabel *PDPL(UIFont *f, UIColor *c, NSTextAlignment a) {
 	[self.clockTimer invalidate]; self.clockTimer = nil;
 	[self.attrTimer invalidate]; self.attrTimer = nil;
 	self.camera.url = nil;
+	self.mirror.host = nil;
 	[super removeFromSuperview];
 }
 
@@ -204,7 +207,13 @@ static UILabel *PDPL(UIFont *f, UIColor *c, NSTextAlignment a) {
 	self.camNote.numberOfLines = 2;
 	self.camToggle = PDButton(@"Pause camera", PD_AMBER);
 	[self.camToggle addTarget:self action:@selector(toggleCam) forControlEvents:UIControlEventTouchUpInside];
-	for (UIView *v in [NSArray arrayWithObjects:self.camNote, self.camToggle, nil]) [self addSubview:v];
+	self.screenToggle = PDButton(@"Touchscreen", PD_ACCENT);
+	[self.screenToggle addTarget:self action:@selector(toggleScreen) forControlEvents:UIControlEventTouchUpInside];
+	self.mirror = [[PDScreenMirrorView alloc] initWithFrame:CGRectZero];
+	self.mirror.layer.cornerRadius = 12;
+	self.mirror.hidden = YES;
+	self.screenOn = [[NSUserDefaults standardUserDefaults] boolForKey:@"PDCameraShowsScreen"];
+	for (UIView *v in [NSArray arrayWithObjects:self.camNote, self.camToggle, self.screenToggle, self.mirror, nil]) [self addSubview:v];
 }
 
 // The 3D viewer with its overlays, layer slider and Follow/Reset button (job and file pages).
@@ -428,8 +437,16 @@ static UILabel *PDPL(UIFont *f, UIColor *c, NSTextAlignment a) {
 		self.camera.alpha = self.camOn ? 1 : 0.45;
 		return;
 	}
-	self.camNote.text = p.connected ? @"Live view of the print. The printer allows four viewers at once." : @"Printer offline.";
+	BOOL screen = self.screenOn && p.cosmos;
+	self.screenToggle.hidden = !p.cosmos;   // the mirror service runs on COSMOS only
+	self.mirror.hidden = !screen;
+	self.mirror.host = screen && p.connected && [UIApplication sharedApplication].applicationState == UIApplicationStateActive ? p.host : nil;
+	self.camNote.text = !p.connected ? @"Printer offline."
+		: screen ? @"Right: the printer's own touchscreen, live. Tap and drag on it as you would on the printer."
+		: @"Live view of the print. The printer allows four viewers at once.";
 	[self.camToggle setTitle:self.camOn ? @"Pause camera" : @"Resume camera" forState:UIControlStateNormal];
+	[self.screenToggle setTitle:screen ? @"Hide touchscreen" : @"Touchscreen" forState:UIControlStateNormal];
+	if (screen != self.mirrorLaidOut) [self setNeedsLayout];
 }
 
 - (void)refreshJob {
@@ -733,6 +750,13 @@ static NSString *PDTempText(NSNumber *cur, NSNumber *target) {
 #pragma mark - Actions
 
 - (void)toggleCam { self.camOn = !self.camOn; [self refreshCamera]; }
+
+- (void)toggleScreen {
+	self.screenOn = !self.screenOn;
+	[[NSUserDefaults standardUserDefaults] setBool:self.screenOn forKey:@"PDCameraShowsScreen"];
+	[self refreshCamera];
+	[self setNeedsLayout];
+}
 
 - (void)pauseResume {
 	PDPrinter *p = [PDPrinter shared];
@@ -1106,13 +1130,28 @@ static NSString *const PDLaneColorHex[] = {@"1A1A1A", @"F2F2F2", @"8A8A8A", @"D3
 
 - (void)layoutCamera:(CGFloat)top {
 	CGFloat W = self.bounds.size.width, H = self.bounds.size.height, pad = 20;
-	CGFloat cw = W - 2 * pad, ch = cw * 9 / 16;
-	if (ch > H - top - 120) { ch = H - top - 120; cw = ch * 16 / 9; }
-	CGFloat cx = (W - cw) / 2;
-	self.camera.frame = CGRectMake(cx, top, cw, ch);
-	self.fpsLabel.frame = CGRectMake(cx + cw - 110, top + ch - 24, 100, 18);
-	self.camNote.frame = CGRectMake(cx, top + ch + 16, cw - 220, 44);
+	BOOL screen = !self.mirror.hidden;
+	self.mirrorLaidOut = screen;
+	CGFloat cw = W - 2 * pad, ch = cw * 9 / 16, cx;
+	if (screen) {
+		// side by side: the camera and the 480 x 272 touchscreen, each half the width (about the touchscreen's real size)
+		CGFloat gap = 16, half = floor((W - 2 * pad - gap) / 2);
+		ch = floor(half * 272 / 480);
+		CGFloat y = top + floor((H - top - 120 - ch) / 2);
+		self.camera.frame = CGRectMake(pad, y, half, ch);
+		self.mirror.frame = CGRectMake(pad + half + gap, y, half, ch);
+		self.fpsLabel.frame = CGRectMake(pad + half - 110, y + ch - 24, 100, 18);
+		cx = pad; cw = W - 2 * pad; top = y;
+	} else {
+		if (ch > H - top - 120) { ch = H - top - 120; cw = ch * 16 / 9; }
+		cx = (W - cw) / 2;
+		self.camera.frame = CGRectMake(cx, top, cw, ch);
+		self.fpsLabel.frame = CGRectMake(cx + cw - 110, top + ch - 24, 100, 18);
+	}
+	BOOL two = !self.screenToggle.hidden;
+	self.camNote.frame = CGRectMake(cx, top + ch + 16, cw - (two ? 436 : 220), 44);
 	self.camToggle.frame = CGRectMake(cx + cw - 200, top + ch + 16, 200, 52);
+	self.screenToggle.frame = CGRectMake(cx + cw - 416, top + ch + 16, 200, 52);
 }
 
 // Lays out the viewer block on the left; returns where the right column starts.

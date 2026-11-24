@@ -18,6 +18,7 @@ static const NSUInteger PDGraphLen = (NSUInteger)PD_GWINDOW + 4;  // samples kep
 @property (nonatomic, readwrite) int port, videoPort;
 @property (nonatomic, readwrite) BOOL connected;
 @property (nonatomic, readwrite, strong) NSDictionary *status, *attributes, *lastTask;
+@property (nonatomic, readwrite) double cosmosPrintTime;
 @property (nonatomic, readwrite, strong) NSArray *files;
 @property (nonatomic, strong) NSMutableArray *nozzleH, *bedH, *chamberH;
 @property (nonatomic, strong) NSMutableArray *nozzleG, *bedG, *chamberG;  // per-second, for the smooth graphs
@@ -63,6 +64,40 @@ static const NSUInteger PDGraphLen = (NSUInteger)PD_GWINDOW + 4;  // samples kep
 	return p;
 }
 
+// Kept on the iPad once read, so the figure still shows while the printer runs Elegoo's firmware again.
+static NSString *const PDEarlierPrintTimeKey = @"PDStockPrintTime";
+
++ (double)earlierPrintTime { return MAX(0, [[NSUserDefaults standardUserDefaults] doubleForKey:PDEarlierPrintTimeKey]); }
+
+// COSMOS keeps Elegoo's /board-resource/sysconf.cfg and serves that folder as Moonraker's "logs" root:
+// read its "cumulative_time : <seconds>" line.
+- (void)fetchStockPrintTime {
+	if (!self.cosmos) return;
+	NSURLRequest *req = [NSURLRequest requestWithURL:[self moonrakerURL:@"/server/files/logs/sysconf.cfg"]
+		cachePolicy:NSURLRequestReloadIgnoringLocalCacheData timeoutInterval:6];
+	[NSURLConnection sendAsynchronousRequest:req queue:[NSOperationQueue mainQueue] completionHandler:^(NSURLResponse *r, NSData *d, NSError *e) {
+		NSInteger code = [r isKindOfClass:[NSHTTPURLResponse class]] ? [(NSHTTPURLResponse *)r statusCode] : 0;
+		NSString *t = code == 200 && d ? [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding] : nil;
+		for (NSString *line in [t componentsSeparatedByString:@"\n"]) {
+			if (![line hasPrefix:@"cumulative_time"]) continue;
+			NSRange c = [line rangeOfString:@":"];
+			if (c.location == NSNotFound) break;
+			double secs = [[line substringFromIndex:c.location + 1] doubleValue];
+			if (secs <= 0 || secs == [PDPrinter earlierPrintTime]) break;
+			[[NSUserDefaults standardUserDefaults] setDouble:secs forKey:PDEarlierPrintTimeKey];
+			[[NSUserDefaults standardUserDefaults] synchronize];
+			[[NSNotificationCenter defaultCenter] postNotificationName:PDPrinterDidUpdateNotification object:self];
+			break;
+		}
+	}];
+}
+
+- (double)lifetimePrintTime {
+	double before = [PDPrinter earlierPrintTime], klipper = self.cosmos ? self.cosmosPrintTime : -1;
+	if (klipper < 0) return before > 0 ? before : -1;
+	return before + klipper;
+}
+
 - (id)init {
 	if ((self = [super init])) {
 		_nozzleH = [NSMutableArray array];
@@ -72,6 +107,7 @@ static const NSUInteger PDGraphLen = (NSUInteger)PD_GWINDOW + 4;  // samples kep
 		_bedG = [NSMutableArray array];
 		_chamberG = [NSMutableArray array];
 		_prevPrintStatus = -1;
+		_cosmosPrintTime = -1;
 		_awaitingOutcome = PDJobUnknown;
 		_videoWaiters = [NSMutableArray array];
 		_graphTimer = [NSTimer timerWithTimeInterval:1.0 target:self selector:@selector(sampleGraph) userInfo:nil repeats:YES];
@@ -121,6 +157,7 @@ static const NSUInteger PDGraphLen = (NSUInteger)PD_GWINDOW + 4;  // samples kep
 		self.attributes = nil;
 		self.files = nil;
 		self.lastTask = nil;
+		self.cosmosPrintTime = -1;
 		self.mainboardID = nil;
 		self.haveStatus = NO;
 		self.prevPrintStatus = -1;
@@ -172,7 +209,9 @@ static const NSUInteger PDGraphLen = (NSUInteger)PD_GWINDOW + 4;  // samples kep
 		id j = d ? [NSJSONSerialization JSONObjectWithData:d options:0 error:NULL] : nil;
 		NSDictionary *res = [j isKindOfClass:[NSDictionary class]] ? PDDict(j, @"result") : nil;
 		BOOL moon = code == 200 && (PDStr(res, @"klippy_state") || PDArr(res, @"components"));
+		if (code == 0 && self.host) { [self openSocket]; return; }   // no answer: keep the mode we had, ask again next time
 		self.cosmos = moon;
+		if (!moon) self.cosmosPrintTime = -1;
 		self.modeKnown = moon || code > 0;
 		if (moon) {
 			self.moonrakerPort = mp;
@@ -184,6 +223,7 @@ static const NSUInteger PDGraphLen = (NSUInteger)PD_GWINDOW + 4;  // samples kep
 				[[NSUserDefaults standardUserDefaults] setObject:cur forKey:@"PDMeshHelperURLSDCP"];
 			[PDMeshSource shared].helperURL = [[self moonrakerURL:@"/printer/objects/query?bed_mesh"] absoluteString];
 			NSLog(@"PrintDeck: %@ runs COSMOS (Moonraker on port %d)", self.host, mp);
+			[self fetchStockPrintTime];
 		} else {
 			self.videoURL = [NSString stringWithFormat:@"http://%@:%d/video", self.host, self.videoPort];
 			if (code > 0 && [[PDMeshSource shared].helperURL rangeOfString:@"/printer/objects/query"].location != NSNotFound)
@@ -230,6 +270,7 @@ static const NSUInteger PDGraphLen = (NSUInteger)PD_GWINDOW + 4;  // samples kep
 	[self.pollTimer invalidate];
 	self.pollTimer = nil;
 	[self setConnectedState:NO error:reason];
+	self.modeKnown = NO;   // ask again before reconnecting: the printer may have been reflashed (SDCP <-> COSMOS)
 	[self scheduleRetry];
 }
 
@@ -727,6 +768,11 @@ static NSNumber *PDI(long v) { return [NSNumber numberWithLong:v]; }
 		return;
 	}
 	NSString *method = PDStr(m, @"method");
+	if ([method isEqualToString:@"notify_filelist_changed"]) {   // a file added, deleted or moved (here, in Mainsail, on the screen)
+		[NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(refreshFiles) object:nil];
+		[self performSelector:@selector(refreshFiles) withObject:nil afterDelay:1.0];   // one refresh for a burst of changes
+		return;
+	}
 	if ([method hasPrefix:@"notify_klippy_"]) {   // ready / shutdown / disconnected: look again now
 		if (![method isEqualToString:@"notify_klippy_shutdown"]) self.mrObjects = nil;
 		[self cosmosCommand:0 data:nil];
@@ -891,9 +937,11 @@ static NSNumber *PDI(long v) { return [NSNumber numberWithLong:v]; }
 			if ([col length] && ![col hasPrefix:@"#"]) col = [@"#" stringByAppendingString:col];
 			BOOL loaded = [PDNum(l, @"prep") boolValue] || [PDNum(l, @"load") boolValue];
 			if ([PDNum(l, @"tool_loaded") boolValue]) active = (int)i;
-			[trays addObject:@{@"tray_id": PDI((long)i), @"brand": @"", @"filament_type": PDStr(l, @"material") ?: @"",
+			// AFC sends "map" as a list (["T0"]); "current_map" is the tool this lane answers to now.
+			NSString *map = PDStr(l, @"current_map") ?: ([[PDArr(l, @"map") lastObject] isKindOfClass:[NSString class]] ? [PDArr(l, @"map") lastObject] : @"");
+			[trays addObject:@{@"tray_id": PDI((long)i), @"brand": PDStr(l, @"spool_vendor") ?: @"", @"filament_type": PDStr(l, @"material") ?: @"",
 				@"filament_name": PDStr(l, @"filament_name") ?: @"", @"filament_color": col, @"status": PDI(loaded),
-				@"lane": [self.lanes objectAtIndex:i], @"map": PDStr(l, @"map") ?: @""}];
+				@"lane": [self.lanes objectAtIndex:i], @"map": map}];
 		}
 		NSDictionary *c = @{@"active_canvas_id": @0, @"active_tray_id": PDI(active), @"auto_refill": @0,
 			@"canvas_list": @[@{@"canvas_id": @0, @"connected": @1, @"tray_list": trays}]};
@@ -1009,6 +1057,13 @@ static NSNumber *PDI(long v) { return [NSNumber numberWithLong:v]; }
 				NSArray *jobs = PDArr(res, @"jobs");
 				if (![jobs count] || ![[jobs objectAtIndex:0] isKindOfClass:[NSDictionary class]]) return;
 				[self handleResponse:321 data:@{@"HistoryDetailList": @[[self taskFromJob:[jobs objectAtIndex:0]]]}];
+			}];
+			// Klipper's print-time total, for the lifetime figure. Asked with the history, so it is fresh after each job.
+			[self rpc:@"server.history.totals" params:nil then:^(id res, NSString *err) {
+				NSNumber *t = PDNum(PDDict(res, @"job_totals"), @"total_print_time");
+				if (!t || !self.cosmos) return;
+				self.cosmosPrintTime = [t doubleValue];
+				[[NSNotificationCenter defaultCenter] postNotificationName:PDPrinterDidUpdateNotification object:self];
 			}];
 			break;
 		}

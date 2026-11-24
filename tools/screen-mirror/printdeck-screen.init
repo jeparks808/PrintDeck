@@ -1,0 +1,27 @@
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          printdeck-screen
+# Required-Start:    $network
+# Default-Start:     2 3 4 5
+# Description:       PrintDeck touchscreen mirror (port 8091)
+### END INIT INFO
+# Installed by PrintDeck's tools/screen-mirror/install.sh. Remove with: install.sh <printer-ip> --remove
+DAEMON=/usr/bin/python3
+SCRIPT=/data/printdeck/printdeck-screen.py
+PIDFILE=/var/run/printdeck-screen.pid
+case "$1" in
+    start)
+        [ -f "$SCRIPT" ] || exit 0
+        start-stop-daemon -S -b -m -p $PIDFILE -x $DAEMON -- $SCRIPT 8091
+        ;;
+    stop)
+        start-stop-daemon -K -p $PIDFILE -x $DAEMON 2>/dev/null; rm -f $PIDFILE
+        ;;
+    restart)
+        $0 stop; sleep 1; $0 start
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart}"; exit 1
+        ;;
+esac
+exit 0

@@ -168,7 +168,8 @@ static UIView *PDFindLabelled(UIView *v, NSString *label) {
 		[self.main openMesh];
 	} else if ([cmd isEqualToString:@"press"]) {   // developer aid: tap the n-th visible button titled `title`
 		NSMutableArray *found = [NSMutableArray array];
-		PDCollectButtons(self.window, [q objectForKey:@"title"] ?: @"", found);
+		// every window: alerts (UIAlertView) live in a window of their own
+		for (UIWindow *w in [UIApplication sharedApplication].windows) PDCollectButtons(w, [q objectForKey:@"title"] ?: @"", found);
 		NSUInteger n = (NSUInteger)[[q objectForKey:@"n"] intValue];
 		if (n < [found count]) {
 			id hit = [found objectAtIndex:n];
@@ -200,7 +201,8 @@ static UIView *PDFindLabelled(UIView *v, NSString *label) {
 			}
 		}
 	} else if ([cmd isEqualToString:@"type"]) {   // developer aid: type text into the visible text field with that accessibility label
-		UITextField *tf = (UITextField *)PDFindLabelled(self.window, [q objectForKey:@"label"] ?: @"");
+		UITextField *tf = nil;
+		for (UIWindow *w in [UIApplication sharedApplication].windows) if (!tf) tf = (UITextField *)PDFindLabelled(w, [q objectForKey:@"label"] ?: @"");
 		if ([tf isKindOfClass:[UITextField class]]) {
 			[tf becomeFirstResponder];
 			tf.text = [q objectForKey:@"text"] ?: @"";

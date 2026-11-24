@@ -3,6 +3,16 @@
 Each release's .deb is attached to its [GitHub release](https://github.com/jeparks808/PrintDeck/releases). To install
 it on a jailbroken iPad (iOS 5), copy it over, run `dpkg -i` as root, then run `su mobile -c uicache`.
 
+## Unreleased
+- **Printer touchscreen on the Camera page (COSMOS).** **Touchscreen** shows the printer's own screen, live, beside
+  the camera, and taps and drags on it reach the printer. It needs PrintDeck's small mirror service on the printer:
+  `tools/screen-mirror/install.sh <printer-ip>`.
+- **Lifetime print time can't be edited any more.** On COSMOS, PrintDeck reads the stock firmware's total from the
+  printer (`/board-resource/sysconf.cfg`, which Moonraker serves) and adds COSMOS's own print time. The
+  ••• → Lifetime print time… entry is gone, and a total typed in earlier is no longer used.
+- **The Files list follows the printer on COSMOS.** Files added, deleted or renamed on the printer (Mainsail, its
+  touchscreen, another app) show up within a second, instead of only after reconnecting.
+
 ## 0.2.2 (23 Nov 2026)
 - Release builds no longer carry the builder's own slicer presets (`Resources/ImportedPresets.plist`, made by
   `tools/import-user-presets.py`). That file is now kept out of git, and `make package FINALPACKAGE=1` leaves it out.
