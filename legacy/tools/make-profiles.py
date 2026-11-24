@@ -16,7 +16,7 @@ REPO = 'https://github.com/ELEGOO-3D/ElegooSlicer.git'
 PRINTER_MODELS = ['Elegoo Centauri Carbon']   # printers PrintDeck's start/end G-code and upload support
 HERE = os.path.dirname(os.path.abspath(__file__))
 OUT = os.path.join(HERE, '..', 'Resources', 'StockProfiles.plist')
-BED_OUT = os.path.join(HERE, '..', 'PDBedShape.h')
+BED_OUT = os.path.join(HERE, '..', 'Sources', 'Common', 'PDBedShape.h')
 
 
 def fetch(dest):
